@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,9 +17,11 @@ import (
 
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/config"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/core"
+	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/event"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/health"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/middleware"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/server"
+	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token"
 )
 
 const drainDelay = 5 * time.Second
@@ -63,6 +66,16 @@ func run(configPath string) error {
 		return err
 	}
 	logger.Info("database connected")
+
+	if err := core.RunMigrations(db.DB.DB); err != nil {
+		return fmt.Errorf("run migrations: %w", err)
+	}
+	logger.Info("migrations applied")
+
+	tokenRepo := token.NewRepository(db.DB)
+	eventRepo := event.NewRepository(db.DB)
+	_ = tokenRepo
+	_ = eventRepo
 
 	rdb, err := core.NewRedis(ctx, cfg.Redis)
 	if err != nil {

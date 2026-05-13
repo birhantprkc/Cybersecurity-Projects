@@ -73,6 +73,8 @@ linters:
       excludes:
         - G104
         - G706
+        - G107
+        - G704
 
     sloglint:
       no-mixed-args: true

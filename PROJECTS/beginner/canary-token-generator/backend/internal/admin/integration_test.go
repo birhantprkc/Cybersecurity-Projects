@@ -62,7 +62,7 @@ func setupIntgStack(t *testing.T) *intgStack {
 	r.Route("/api", func(api chi.Router) {
 		api.Route("/admin", func(adm chi.Router) {
 			adm.Use(middleware.OperatorBearer(intgOperatorToken))
-			adminH.Register(adm)
+			adminH.RegisterRoutes(adm)
 		})
 	})
 

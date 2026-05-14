@@ -333,7 +333,7 @@ func mountAdminRoutes(
 	}
 	api.Route("/admin", func(adm chi.Router) {
 		adm.Use(middleware.OperatorBearer(cfg.Operator.Token))
-		adminH.Register(adm)
+		adminH.RegisterRoutes(adm)
 	})
 }
 

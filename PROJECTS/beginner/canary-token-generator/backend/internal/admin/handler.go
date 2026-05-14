@@ -79,7 +79,7 @@ func NewHandler(
 	}
 }
 
-func (h *Handler) Register(r chi.Router) {
+func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/stats", h.GetStats)
 	r.Get("/tokens", h.ListTokens)
 	r.Post("/tokens/{"+urlParamID+"}/disable", h.DisableToken)

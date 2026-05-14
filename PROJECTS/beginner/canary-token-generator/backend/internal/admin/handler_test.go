@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -158,7 +159,7 @@ func quietLogger() *slog.Logger {
 
 func newRouter(h *admin.Handler) chi.Router {
 	r := chi.NewRouter()
-	h.Register(r)
+	h.RegisterRoutes(r)
 	return r
 }
 
@@ -370,7 +371,7 @@ func TestAdmin_ListTokens_LimitCappedAt100(t *testing.T) {
 	repo := newFakeTokenRepo()
 	for i := range 150 {
 		repo.tokens = append(repo.tokens, seedToken(
-			"lim"+strItoa(i),
+			"lim"+strconv.Itoa(i),
 			token.TypeWebbug,
 			token.ChannelWebhook,
 		))
@@ -502,17 +503,4 @@ func TestAdmin_DisableToken_GetIsNotRouted(t *testing.T) {
 		nil,
 	))
 	require.Equal(t, http.StatusMethodNotAllowed, w.Code)
-}
-
-func strItoa(i int) string {
-	const digits = "0123456789"
-	if i == 0 {
-		return "0"
-	}
-	var out []byte
-	for i > 0 {
-		out = append([]byte{digits[i%10]}, out...)
-		i /= 10
-	}
-	return string(out)
 }

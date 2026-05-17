@@ -23,6 +23,7 @@ import (
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/config"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/core"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/event"
+	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/geoip"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/health"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/middleware"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/notify"
@@ -92,8 +93,11 @@ func run(configPath string) error {
 	}
 	logger.Info("redis connected")
 
+	geo, geoCloser := openGeoIP(cfg, logger)
+	defer geoCloser()
+
 	notifySvc, eventSvc := buildEventStack(
-		cfg, logger, eventRepo, tokenRepo, rdb,
+		cfg, logger, eventRepo, tokenRepo, rdb, geo,
 	)
 	tokenSvc, verifier, healthH, tokenH := buildHTTPDeps(
 		cfg, logger, db, rdb, eventRepo, tokenRepo, eventSvc,
@@ -169,6 +173,7 @@ func buildEventStack(
 	eventRepo *event.Repository,
 	tokenRepo *token.Repository,
 	rdb *core.Redis,
+	geo geoip.Lookuper,
 ) (*notify.Service, *event.Service) {
 	tgSender := telegram.NewSender(telegram.Config{
 		APIBase:         cfg.Notify.TelegramAPIBase,
@@ -199,9 +204,28 @@ func buildEventStack(
 		event.ServiceConfig{
 			DedupTTL: cfg.Notify.DedupTTL,
 			Logger:   logger,
+			GeoIP:    geo,
 		},
 	)
 	return notifySvc, eventSvc
+}
+
+func openGeoIP(
+	cfg *config.Config,
+	logger *slog.Logger,
+) (geoip.Lookuper, func()) {
+	svc, err := geoip.Open(cfg.GeoIP.Path)
+	if err != nil {
+		logger.Warn("geoip unavailable, enrichment disabled",
+			"path", cfg.GeoIP.Path, "error", err)
+		return geoip.NopService(), func() {}
+	}
+	logger.Info("geoip opened", "path", cfg.GeoIP.Path)
+	return svc, func() {
+		if cErr := svc.Close(); cErr != nil {
+			logger.Warn("geoip close error", "error", cErr)
+		}
+	}
 }
 
 func spawnMySQLListener(

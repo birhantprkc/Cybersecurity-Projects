@@ -47,7 +47,10 @@ export type ManagePage = z.infer<typeof managePageSchema>
 
 export const manageResponseSchema = z.object({
   token: manageTokenViewSchema,
-  events: z.array(eventResponseSchema),
+  events: z
+    .array(eventResponseSchema)
+    .nullish()
+    .transform((v) => v ?? []),
   events_total: z.number().int().nonnegative(),
   events_silenced_active: z.number().int().nonnegative(),
   page: managePageSchema,

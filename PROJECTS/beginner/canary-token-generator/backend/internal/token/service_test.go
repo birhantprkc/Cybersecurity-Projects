@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/event"
@@ -356,6 +357,119 @@ func TestService_Create_DistinctIDsAcrossCalls(t *testing.T) {
 		28,
 		"ID generation must be sufficiently random",
 	)
+}
+
+type collisionRepo struct {
+	mu         sync.Mutex
+	collisions int
+	remaining  int
+	inserted   []*token.Token
+	byID       map[string]*token.Token
+}
+
+func newCollisionRepo(collisions int) *collisionRepo {
+	return &collisionRepo{
+		remaining: collisions,
+		byID:      map[string]*token.Token{},
+	}
+}
+
+func (r *collisionRepo) Insert(_ context.Context, t *token.Token) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.remaining > 0 {
+		r.remaining--
+		r.collisions++
+		return &pgconn.PgError{Code: "23505"}
+	}
+	r.inserted = append(r.inserted, t)
+	r.byID[t.ID] = t
+	return nil
+}
+
+func (r *collisionRepo) GetByID(
+	_ context.Context, id string,
+) (*token.Token, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.byID[id]
+	if !ok {
+		return nil, token.ErrNotFound
+	}
+	return t, nil
+}
+
+func (r *collisionRepo) GetByManageID(
+	_ context.Context, _ string,
+) (*token.Token, error) {
+	return nil, token.ErrNotFound
+}
+
+func (r *collisionRepo) IncrementTriggerCount(
+	_ context.Context, _ string,
+) error {
+	return nil
+}
+
+func (r *collisionRepo) DeleteByManageID(
+	_ context.Context, _ string,
+) error {
+	return token.ErrNotFound
+}
+
+func TestService_Create_RetriesOnTokenIDCollision(t *testing.T) {
+	repo := newCollisionRepo(2)
+	gen := &fakeGenerator{
+		tokenType: token.TypeWebbug,
+		artifact: generators.Artifact{
+			Kind: generators.KindURL,
+			URL:  "https://canary.example.com/c/x",
+		},
+	}
+	svc := token.NewService(
+		repo,
+		token.MapRegistry{token.TypeWebbug: gen},
+		token.ServiceConfig{BaseURL: "https://canary.example.com"},
+	)
+
+	tok, _, err := svc.Create(context.Background(), token.CreateRequest{
+		Type:         token.TypeWebbug,
+		Memo:         "x",
+		AlertChannel: token.ChannelWebhook,
+		WebhookURL:   "https://example.com/h",
+	}, "fp", "ip")
+	require.NoError(t, err)
+	require.NotNil(t, tok)
+	require.Equal(t, 2, repo.collisions,
+		"repo must have rejected exactly two prior IDs")
+	require.Len(t, repo.inserted, 1, "exactly one token persisted")
+	require.Equal(t, int32(3), gen.calls.Load(),
+		"generator called once per attempt (regenerates artifact per id)")
+}
+
+func TestService_Create_GivesUpAfterMaxCollisions(t *testing.T) {
+	repo := newCollisionRepo(10)
+	gen := &fakeGenerator{
+		tokenType: token.TypeWebbug,
+		artifact: generators.Artifact{
+			Kind: generators.KindURL,
+			URL:  "https://canary.example.com/c/x",
+		},
+	}
+	svc := token.NewService(
+		repo,
+		token.MapRegistry{token.TypeWebbug: gen},
+		token.ServiceConfig{BaseURL: "https://canary.example.com"},
+	)
+
+	_, _, err := svc.Create(context.Background(), token.CreateRequest{
+		Type:         token.TypeWebbug,
+		Memo:         "x",
+		AlertChannel: token.ChannelWebhook,
+		WebhookURL:   "https://example.com/h",
+	}, "fp", "ip")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "id-collision retries")
 }
 
 func TestService_GetByID_NotFoundReturnsNilNil(t *testing.T) {

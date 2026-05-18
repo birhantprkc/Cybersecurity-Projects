@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -22,6 +23,9 @@ const (
 
 	metadataDestinationURL = "destination_url"
 	metadataIncludeKeys    = "include_keys"
+
+	pgUniqueViolationCode = "23505"
+	maxTokenIDAttempts    = 5
 )
 
 var (
@@ -35,6 +39,7 @@ var (
 		"token: no generator registered for this type",
 	)
 	ErrGenerateFailed = errors.New("token: artifact generation failed")
+	ErrValidation     = errors.New("token: request validation failed")
 )
 
 var allowedIncludeKeys = map[string]struct{}{
@@ -94,7 +99,7 @@ func (s *Service) Create(
 ) (*Token, Artifact, error) {
 	if err := s.validate.Struct(req); err != nil {
 		return nil, Artifact{}, fmt.Errorf(
-			"validate request: %w", err,
+			"%w: %w", ErrValidation, err,
 		)
 	}
 	if err := validateTypeMetadata(req.Type, req.Metadata); err != nil {
@@ -108,16 +113,8 @@ func (s *Service) Create(
 		)
 	}
 
-	id, err := generateTokenID()
-	if err != nil {
-		return nil, Artifact{}, fmt.Errorf(
-			"generate id: %w", err,
-		)
-	}
 	manageID := uuid.NewString()
-
 	tok := &Token{
-		ID:           id,
 		ManageID:     manageID,
 		Type:         req.Type,
 		Memo:         req.Memo,
@@ -132,19 +129,45 @@ func (s *Service) Create(
 		Metadata:     normalizeMetadata(req.Metadata),
 	}
 
-	art, err := gen.Generate(ctx, tok, s.baseURL)
-	if err != nil {
-		return nil, Artifact{}, fmt.Errorf(
-			"%w: %w", ErrGenerateFailed, err,
-		)
-	}
+	var (
+		art       Artifact
+		insertErr error
+	)
+	for attempt := range maxTokenIDAttempts {
+		id, err := generateTokenID()
+		if err != nil {
+			return nil, Artifact{}, fmt.Errorf(
+				"generate id (attempt %d): %w", attempt, err,
+			)
+		}
+		tok.ID = id
 
-	if err := s.repo.Insert(ctx, tok); err != nil {
-		return nil, Artifact{}, fmt.Errorf(
-			"persist token: %w", err,
-		)
+		art, err = gen.Generate(ctx, tok, s.baseURL)
+		if err != nil {
+			return nil, Artifact{}, fmt.Errorf(
+				"%w: %w", ErrGenerateFailed, err,
+			)
+		}
+
+		insertErr = s.repo.Insert(ctx, tok)
+		if insertErr == nil {
+			return tok, art, nil
+		}
+		if !isUniqueViolation(insertErr) {
+			return nil, Artifact{}, fmt.Errorf(
+				"persist token: %w", insertErr,
+			)
+		}
 	}
-	return tok, art, nil
+	return nil, Artifact{}, fmt.Errorf(
+		"persist token after %d id-collision retries: %w",
+		maxTokenIDAttempts, insertErr,
+	)
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolationCode
 }
 
 func (s *Service) GetByID(

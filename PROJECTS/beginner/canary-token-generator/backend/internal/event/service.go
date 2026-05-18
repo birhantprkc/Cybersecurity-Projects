@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -17,9 +16,9 @@ import (
 )
 
 const (
-	dedupKeyPrefix  = "dedup:trigger:"
-	defaultDedupTTL = 15 * time.Minute
-	dedupScanBatch  = 100
+	dedupKeyPrefix    = "dedup:trigger:"
+	dedupActivePrefix = "dedup:active:"
+	defaultDedupTTL   = 15 * time.Minute
 )
 
 type Service struct {
@@ -132,6 +131,17 @@ func (s *Service) dedupGate(
 		s.logger.WarnContext(ctx, "dedup incr failed",
 			"error", iErr, "key", key)
 	}
+	trackKey := dedupActivePrefix + tokenID
+	if _, sErr := s.rdb.SAdd(ctx, trackKey, sourceIP).Result(); sErr != nil {
+		s.logger.WarnContext(ctx, "dedup track add",
+			"error", sErr, "key", trackKey)
+	}
+	if _, eErr := s.rdb.Expire(
+		ctx, trackKey, s.dedupTTL,
+	).Result(); eErr != nil {
+		s.logger.WarnContext(ctx, "dedup track expire",
+			"error", eErr, "key", trackKey)
+	}
 	return false
 }
 
@@ -142,40 +152,14 @@ func (s *Service) CountActiveDedup(
 	if s.rdb == nil {
 		return 0, nil
 	}
-	pattern := dedupKeyPrefix + tokenID + ":*"
-	var total int64
-	var cursor uint64
-	for {
-		keys, next, err := s.rdb.Scan(
-			ctx, cursor, pattern, dedupScanBatch,
-		).Result()
-		if err != nil {
-			return 0, fmt.Errorf("dedup scan: %w", err)
-		}
-		for _, key := range keys {
-			v, gErr := s.rdb.Get(ctx, key).Result()
-			if errors.Is(gErr, redis.Nil) {
-				continue
-			}
-			if gErr != nil {
-				s.logger.WarnContext(ctx, "dedup count: get key",
-					"error", gErr, "key", key)
-				continue
-			}
-			n, pErr := strconv.ParseInt(v, 10, 64)
-			if pErr != nil {
-				continue
-			}
-			if n > 1 {
-				total += n - 1
-			}
-		}
-		if next == 0 {
-			break
-		}
-		cursor = next
+	n, err := s.rdb.SCard(ctx, dedupActivePrefix+tokenID).Result()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
 	}
-	return total, nil
+	if err != nil {
+		return 0, fmt.Errorf("dedup count: %w", err)
+	}
+	return n, nil
 }
 
 func (s *Service) RunRetentionLoop(

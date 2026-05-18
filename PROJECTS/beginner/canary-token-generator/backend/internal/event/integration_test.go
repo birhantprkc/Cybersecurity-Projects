@@ -128,6 +128,7 @@ func setupIntgStack(t *testing.T) *intgStack {
 		eventRepo,
 		eventSvc,
 		logger,
+		false,
 	)
 
 	r := chi.NewRouter()
@@ -412,8 +413,8 @@ func TestIntegration_ManagePageReturnsTokenAndEventsAndSilencedCount(t *testing.
 
 	require.Equal(t, int64(3), manageResp.Data.EventsTotal,
 		"all 3 events recorded (one sent + two deduped)")
-	require.Equal(t, int64(2), manageResp.Data.EventsSilencedActive,
-		"two triggers deduped within 15-min window")
+	require.Equal(t, int64(1), manageResp.Data.EventsSilencedActive,
+		"one unique IP silenced (same source for both dedup hits)")
 
 	require.Len(t, manageResp.Data.Events, 3, "events page payload")
 	require.False(t, manageResp.Data.Page.HasMore,

@@ -127,7 +127,14 @@ func run(configPath string) error {
 
 	shutdownErr := gracefulShutdown(cfg, logger, srv, telemetry, rdb, db)
 	logger.Info("waiting for in-flight notifications")
-	notifySvc.Wait()
+	notifyShutdownCtx, notifyShutdownCancel := context.WithTimeout(
+		context.Background(),
+		cfg.Server.ShutdownTimeout,
+	)
+	if nErr := notifySvc.Shutdown(notifyShutdownCtx); nErr != nil {
+		logger.Warn("notify shutdown timed out", "error", nErr)
+	}
+	notifyShutdownCancel()
 	wg.Wait()
 	return shutdownErr
 }

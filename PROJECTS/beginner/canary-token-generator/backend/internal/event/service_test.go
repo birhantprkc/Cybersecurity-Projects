@@ -582,8 +582,8 @@ func TestService_CountActiveDedup_CountsSilencedAcrossIPs(t *testing.T) {
 
 	n, err := svc.CountActiveDedup(context.Background(), testTokenID)
 	require.NoError(t, err)
-	require.Equal(t, int64(2+4), n,
-		"key1=3 (silenced 2) + key2=5 (silenced 4)")
+	require.Equal(t, int64(2), n,
+		"two distinct IPs were silenced (203.0.113.1 and 203.0.113.2)")
 }
 
 func TestService_CountActiveDedup_IgnoresOtherTokens(t *testing.T) {
@@ -616,7 +616,8 @@ func TestService_CountActiveDedup_IgnoresOtherTokens(t *testing.T) {
 
 	n, err := svc.CountActiveDedup(context.Background(), testTokenID)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), n, "only this token's keys counted")
+	require.Equal(t, int64(1), n,
+		"only this token's silenced IPs counted (one distinct IP)")
 }
 
 func TestService_CountActiveDedup_NilRedisReturnsZero(t *testing.T) {

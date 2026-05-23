@@ -276,11 +276,12 @@ jobs:
         check-latest: true
 
     # C++ Setup
-    - name: Install clang-format and cppcheck
+    - name: Install clang-format-19 and cppcheck
       if: matrix.type == 'cpp'
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y clang-format cppcheck
+        sudo apt-get install -y clang-format-19 cppcheck
+        sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-19 100
 
     # Bash Setup (shellcheck pre-installed on ubuntu-latest, but ensure latest)
     - name: Install shellcheck

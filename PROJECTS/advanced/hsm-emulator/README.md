@@ -18,6 +18,12 @@
 
 > A software **Hardware Security Module** that compiles to a real Cryptoki (PKCS#11) shared object. Load it with `pkcs11-tool`, OpenSSL, or any PKCS#11 host the same way you would a real smartcard or HSM. It speaks the C ABI byte for byte, generates and stores keys, signs and encrypts, and keeps private key material sealed on disk and zeroized in RAM.
 
+<p align="center">
+  <a href="https://youtu.be/Na-bmX9px4g">
+    <img src="https://img.youtube.com/vi/Na-bmX9px4g/maxresdefault.jpg" alt="Watch Learn Video">
+  </a>
+</p>
+
 ## Why PKCS#11 in Zig
 
 PKCS#11 (Cryptoki) is the C-ABI standard that smartcards, YubiKeys, and cloud HSMs all speak. A conforming module is a `.so` that exports one function, `C_GetFunctionList`, returning a 68-entry table of function pointers in a *fixed canonical order*. Get one struct offset or one pointer slot wrong and the host loads garbage.

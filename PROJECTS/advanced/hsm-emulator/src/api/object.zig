@@ -125,8 +125,7 @@ fn persistIfToken(inst: *state.Instance, is_token: bool) void {
 }
 
 pub fn C_CreateObject(hSession: ck.CK_SESSION_HANDLE, pTemplate: [*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG, phObject: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -150,8 +149,7 @@ pub fn C_CreateObject(hSession: ck.CK_SESSION_HANDLE, pTemplate: [*]ck.CK_ATTRIB
 }
 
 pub fn C_CopyObject(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HANDLE, pTemplate: [*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG, phNewObject: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -183,8 +181,7 @@ pub fn C_CopyObject(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HANDLE
 }
 
 pub fn C_DestroyObject(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -201,8 +198,7 @@ pub fn C_DestroyObject(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HAN
 }
 
 pub fn C_GetObjectSize(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HANDLE, pulSize: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     _ = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -214,8 +210,7 @@ pub fn C_GetObjectSize(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HAN
 }
 
 pub fn C_GetAttributeValue(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HANDLE, pTemplate: [*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     _ = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -251,8 +246,7 @@ pub fn C_GetAttributeValue(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT
 }
 
 pub fn C_SetAttributeValue(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT_HANDLE, pTemplate: [*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -281,8 +275,7 @@ pub fn C_SetAttributeValue(hSession: ck.CK_SESSION_HANDLE, hObject: ck.CK_OBJECT
 }
 
 pub fn C_FindObjectsInit(hSession: ck.CK_SESSION_HANDLE, pTemplate: ?[*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -306,8 +299,7 @@ pub fn C_FindObjectsInit(hSession: ck.CK_SESSION_HANDLE, pTemplate: ?[*]ck.CK_AT
 }
 
 pub fn C_FindObjects(hSession: ck.CK_SESSION_HANDLE, phObject: [*]ck.CK_OBJECT_HANDLE, ulMaxObjectCount: ck.CK_ULONG, pulObjectCount: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
@@ -324,8 +316,7 @@ pub fn C_FindObjects(hSession: ck.CK_SESSION_HANDLE, phObject: [*]ck.CK_OBJECT_H
 }
 
 pub fn C_FindObjectsFinal(hSession: ck.CK_SESSION_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
 
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;

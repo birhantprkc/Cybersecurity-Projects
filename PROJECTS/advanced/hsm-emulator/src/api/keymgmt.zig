@@ -25,8 +25,7 @@ fn ulongFrom(bytes: []const u8) ?ck.CK_ULONG {
 }
 
 pub fn C_GenerateKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, pTemplate: [*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG, phKey: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (pMechanism.mechanism != ck.CKM_AES_KEY_GEN) return ck.CKR_MECHANISM_INVALID;
@@ -168,8 +167,7 @@ fn buildRsaPrivate(obj: *Object, allocator: std.mem.Allocator, template: []const
 }
 
 pub fn C_GenerateKeyPair(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, pPublicKeyTemplate: [*]ck.CK_ATTRIBUTE, ulPublicKeyAttributeCount: ck.CK_ULONG, pPrivateKeyTemplate: [*]ck.CK_ATTRIBUTE, ulPrivateKeyAttributeCount: ck.CK_ULONG, phPublicKey: *ck.CK_OBJECT_HANDLE, phPrivateKey: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
 
@@ -354,8 +352,7 @@ fn oaepParams(pMechanism: *ck.CK_MECHANISM) OaepVal {
 }
 
 pub fn C_WrapKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hWrappingKey: ck.CK_OBJECT_HANDLE, hKey: ck.CK_OBJECT_HANDLE, pWrappedKey: ?[*]ck.CK_BYTE, pulWrappedKeyLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     _ = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
 
@@ -411,8 +408,7 @@ pub fn C_WrapKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, h
 }
 
 pub fn C_UnwrapKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hUnwrappingKey: ck.CK_OBJECT_HANDLE, pWrappedKey: [*]ck.CK_BYTE, ulWrappedKeyLen: ck.CK_ULONG, pTemplate: [*]ck.CK_ATTRIBUTE, ulAttributeCount: ck.CK_ULONG, phKey: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
 
@@ -513,8 +509,7 @@ fn peerPointSec1(curve: ecdsa.Curve, data: []const u8) ?[]const u8 {
 }
 
 pub fn C_DeriveKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hBaseKey: ck.CK_OBJECT_HANDLE, pTemplate: ?[*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG, phKey: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (pMechanism.mechanism != ck.CKM_ECDH1_DERIVE) return ck.CKR_MECHANISM_INVALID;

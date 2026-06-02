@@ -373,6 +373,60 @@ fn updateOutLen(op: *const cipher.Cipher, in_len: usize) ck.CK_ULONG {
     return @intCast(((op.partial_len + in_len) / config.aes_block_len) * config.aes_block_len);
 }
 
+const NeedResult = union(enum) { ok: ck.CK_ULONG, err: ck.CK_RV };
+const EmitResult = union(enum) { ok: usize, err: ck.CK_RV };
+
+fn encUpdateNeed(op: *const session.EncryptOp, in_len: usize) NeedResult {
+    return switch (op.*) {
+        .rsa => .{ .err = ck.CKR_FUNCTION_NOT_SUPPORTED },
+        .aes => |*c| .{ .ok = updateOutLen(c, in_len) },
+        .gcm => .{ .ok = 0 },
+    };
+}
+
+fn encUpdateEmit(inst: *state.Instance, op: *session.EncryptOp, in: []const u8, out: []u8) EmitResult {
+    switch (op.*) {
+        .rsa => return .{ .err = ck.CKR_FUNCTION_NOT_SUPPORTED },
+        .aes => |*c| return .{ .ok = c.encryptUpdate(in, out) },
+        .gcm => |*g| {
+            g.append(inst.allocator(), in) catch |e| return .{ .err = switch (e) {
+                error.OutOfMemory => ck.CKR_HOST_MEMORY,
+                error.TooLarge => ck.CKR_DATA_LEN_RANGE,
+            } };
+            return .{ .ok = 0 };
+        },
+    }
+}
+
+fn decUpdateNeed(op: *const session.DecryptOp, in_len: usize) NeedResult {
+    return switch (op.*) {
+        .rsa => .{ .err = ck.CKR_FUNCTION_NOT_SUPPORTED },
+        .aes => |*c| .{ .ok = updateOutLen(c, in_len) },
+        .gcm => .{ .ok = 0 },
+    };
+}
+
+fn decUpdateEmit(inst: *state.Instance, op: *session.DecryptOp, in: []const u8, out: []u8) EmitResult {
+    switch (op.*) {
+        .rsa => return .{ .err = ck.CKR_FUNCTION_NOT_SUPPORTED },
+        .aes => |*c| return .{ .ok = c.decryptUpdate(in, out) },
+        .gcm => |*g| {
+            g.append(inst.allocator(), in) catch |e| return .{ .err = switch (e) {
+                error.OutOfMemory => ck.CKR_HOST_MEMORY,
+                error.TooLarge => ck.CKR_ENCRYPTED_DATA_LEN_RANGE,
+            } };
+            return .{ .ok = 0 };
+        },
+    }
+}
+
+fn decryptSideDualOk(op: *const session.DecryptOp) bool {
+    return switch (op.*) {
+        .aes => |*c| c.mode == .cbc,
+        else => false,
+    };
+}
+
 fn emitDigest(sess: *session.Session, pDigest: ?[*]ck.CK_BYTE, pulDigestLen: *ck.CK_ULONG) ck.CK_RV {
     const op = &sess.digest_op.?;
     const dlen: ck.CK_ULONG = @intCast(op.digestLen());
@@ -415,16 +469,16 @@ fn rsaCryptInit(inst: *state.Instance, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK
 }
 
 pub fn C_EncryptInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.encrypt_op != null) return ck.CKR_OPERATION_ACTIVE;
     if (cipher.modeOf(pMechanism.mechanism) != null) {
-        sess.encrypt_op = .{ .aes = switch (buildCipher(inst, pMechanism, hKey, true, ck.CKA_ENCRYPT)) {
+        const c = switch (buildCipher(inst, pMechanism, hKey, true, ck.CKA_ENCRYPT)) {
             .err => |rv| return rv,
-            .ok => |c| c,
-        } };
+            .ok => |built| built,
+        };
+        sess.encrypt_op = if (c.mode == .gcm) .{ .gcm = .{ .cipher = c } } else .{ .aes = c };
         return ck.CKR_OK;
     }
     if (isRsaCryptMech(pMechanism.mechanism)) {
@@ -438,8 +492,7 @@ pub fn C_EncryptInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANIS
 }
 
 pub fn C_Encrypt(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen: ck.CK_ULONG, pEncryptedData: ?[*]ck.CK_BYTE, pulEncryptedDataLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     const op = if (sess.encrypt_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -457,19 +510,28 @@ pub fn C_Encrypt(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen
                 return ck.CKR_BUFFER_TOO_SMALL;
             }
             const out = pEncryptedData.?[0..@intCast(need)];
-            var n: usize = 0;
-            switch (c.mode) {
-                .gcm => n = c.gcmEncrypt(in, out),
-                .cbc, .cbc_pad => {
-                    n = c.encryptUpdate(in, out);
-                    n += c.encryptFinal(out[n..]) catch |e| {
-                        sess.endEncrypt();
-                        return mapCipherErr(e);
-                    };
-                },
-            }
+            var n = c.encryptUpdate(in, out);
+            n += c.encryptFinal(out[n..]) catch |e| {
+                sess.endEncrypt(inst.allocator());
+                return mapCipherErr(e);
+            };
             pulEncryptedDataLen.* = @intCast(n);
-            sess.endEncrypt();
+            sess.endEncrypt(inst.allocator());
+            return ck.CKR_OK;
+        },
+        .gcm => |*g| {
+            const need: ck.CK_ULONG = @intCast(cipher.encryptOutLen(.gcm, in.len));
+            if (pEncryptedData == null) {
+                pulEncryptedDataLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulEncryptedDataLen.* < need) {
+                pulEncryptedDataLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = g.cipher.gcmEncrypt(in, pEncryptedData.?[0..@intCast(need)]);
+            pulEncryptedDataLen.* = @intCast(n);
+            sess.endEncrypt(inst.allocator());
             return ck.CKR_OK;
         },
         .rsa => |*r| {
@@ -484,36 +546,32 @@ pub fn C_Encrypt(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen
             }
             const pc = switch (rsaPublicComponents(inst, r.key, ck.CKA_ENCRYPT)) {
                 .err => |rv| {
-                    sess.endEncrypt();
+                    sess.endEncrypt(inst.allocator());
                     return rv;
                 },
                 .ok => |c| c,
             };
             const n = rsa.encrypt(pc, r.params, in, pEncryptedData.?[0..@intCast(need)]) catch {
-                sess.endEncrypt();
+                sess.endEncrypt(inst.allocator());
                 return ck.CKR_DATA_LEN_RANGE;
             };
             pulEncryptedDataLen.* = @intCast(n);
-            sess.endEncrypt();
+            sess.endEncrypt(inst.allocator());
             return ck.CKR_OK;
         },
     }
 }
 
 pub fn C_EncryptUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPartLen: ck.CK_ULONG, pEncryptedPart: ?[*]ck.CK_BYTE, pulEncryptedPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     const op = if (sess.encrypt_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
-    const c = switch (op.*) {
-        .rsa => return ck.CKR_FUNCTION_NOT_SUPPORTED,
-        .aes => |*x| x,
-    };
-    if (c.mode == .gcm) return ck.CKR_FUNCTION_NOT_SUPPORTED;
-
     const in = part(pPart, ulPartLen);
-    const need = updateOutLen(c, in.len);
+    const need = switch (encUpdateNeed(op, in.len)) {
+        .err => |rv| return rv,
+        .ok => |n| n,
+    };
     if (pEncryptedPart == null) {
         pulEncryptedPartLen.* = need;
         return ck.CKR_OK;
@@ -522,51 +580,71 @@ pub fn C_EncryptUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulP
         pulEncryptedPartLen.* = need;
         return ck.CKR_BUFFER_TOO_SMALL;
     }
-    pulEncryptedPartLen.* = @intCast(c.encryptUpdate(in, pEncryptedPart.?[0..@intCast(need)]));
+    const wrote = switch (encUpdateEmit(inst, op, in, pEncryptedPart.?[0..@intCast(need)])) {
+        .err => |rv| {
+            sess.endEncrypt(inst.allocator());
+            return rv;
+        },
+        .ok => |n| n,
+    };
+    pulEncryptedPartLen.* = @intCast(wrote);
     return ck.CKR_OK;
 }
 
 pub fn C_EncryptFinal(hSession: ck.CK_SESSION_HANDLE, pLastEncryptedPart: ?[*]ck.CK_BYTE, pulLastEncryptedPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     const op = if (sess.encrypt_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
-    const c = switch (op.*) {
+    switch (op.*) {
         .rsa => return ck.CKR_FUNCTION_NOT_SUPPORTED,
-        .aes => |*x| x,
-    };
-    if (c.mode == .gcm) return ck.CKR_FUNCTION_NOT_SUPPORTED;
-
-    const need: ck.CK_ULONG = if (c.mode == .cbc_pad) config.aes_block_len else 0;
-    if (pLastEncryptedPart == null) {
-        pulLastEncryptedPartLen.* = need;
-        return ck.CKR_OK;
+        .aes => |*c| {
+            const need: ck.CK_ULONG = if (c.mode == .cbc_pad) config.aes_block_len else 0;
+            if (pLastEncryptedPart == null) {
+                pulLastEncryptedPartLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulLastEncryptedPartLen.* < need) {
+                pulLastEncryptedPartLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = c.encryptFinal(pLastEncryptedPart.?[0..@intCast(need)]) catch |e| {
+                sess.endEncrypt(inst.allocator());
+                return mapCipherErr(e);
+            };
+            pulLastEncryptedPartLen.* = @intCast(n);
+            sess.endEncrypt(inst.allocator());
+            return ck.CKR_OK;
+        },
+        .gcm => |*g| {
+            const need: ck.CK_ULONG = @intCast(g.len + config.gcm_tag_len);
+            if (pLastEncryptedPart == null) {
+                pulLastEncryptedPartLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulLastEncryptedPartLen.* < need) {
+                pulLastEncryptedPartLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = g.cipher.gcmEncrypt(g.data(), pLastEncryptedPart.?[0..@intCast(need)]);
+            pulLastEncryptedPartLen.* = @intCast(n);
+            sess.endEncrypt(inst.allocator());
+            return ck.CKR_OK;
+        },
     }
-    if (pulLastEncryptedPartLen.* < need) {
-        pulLastEncryptedPartLen.* = need;
-        return ck.CKR_BUFFER_TOO_SMALL;
-    }
-    const n = c.encryptFinal(pLastEncryptedPart.?[0..@intCast(need)]) catch |e| {
-        sess.endEncrypt();
-        return mapCipherErr(e);
-    };
-    pulLastEncryptedPartLen.* = @intCast(n);
-    sess.endEncrypt();
-    return ck.CKR_OK;
 }
 
 pub fn C_DecryptInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.decrypt_op != null) return ck.CKR_OPERATION_ACTIVE;
     if (cipher.modeOf(pMechanism.mechanism) != null) {
-        sess.decrypt_op = .{ .aes = switch (buildCipher(inst, pMechanism, hKey, false, ck.CKA_DECRYPT)) {
+        const c = switch (buildCipher(inst, pMechanism, hKey, false, ck.CKA_DECRYPT)) {
             .err => |rv| return rv,
-            .ok => |c| c,
-        } };
+            .ok => |built| built,
+        };
+        sess.decrypt_op = if (c.mode == .gcm) .{ .gcm = .{ .cipher = c } } else .{ .aes = c };
         return ck.CKR_OK;
     }
     if (isRsaCryptMech(pMechanism.mechanism)) {
@@ -580,8 +658,7 @@ pub fn C_DecryptInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANIS
 }
 
 pub fn C_Decrypt(hSession: ck.CK_SESSION_HANDLE, pEncryptedData: [*]ck.CK_BYTE, ulEncryptedDataLen: ck.CK_ULONG, pData: ?[*]ck.CK_BYTE, pulDataLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     const op = if (sess.decrypt_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -599,22 +676,31 @@ pub fn C_Decrypt(hSession: ck.CK_SESSION_HANDLE, pEncryptedData: [*]ck.CK_BYTE, 
                 return ck.CKR_BUFFER_TOO_SMALL;
             }
             const out = pData.?[0..@intCast(need)];
-            var n: usize = 0;
-            switch (c.mode) {
-                .gcm => n = c.gcmDecrypt(in, out) catch |e| {
-                    sess.endDecrypt();
-                    return mapCipherErr(e);
-                },
-                .cbc, .cbc_pad => {
-                    n = c.decryptUpdate(in, out);
-                    n += c.decryptFinal(out[n..]) catch |e| {
-                        sess.endDecrypt();
-                        return mapCipherErr(e);
-                    };
-                },
-            }
+            var n = c.decryptUpdate(in, out);
+            n += c.decryptFinal(out[n..]) catch |e| {
+                sess.endDecrypt(inst.allocator());
+                return mapCipherErr(e);
+            };
             pulDataLen.* = @intCast(n);
-            sess.endDecrypt();
+            sess.endDecrypt(inst.allocator());
+            return ck.CKR_OK;
+        },
+        .gcm => |*g| {
+            const need: ck.CK_ULONG = @intCast(cipher.decryptOutLen(.gcm, in.len));
+            if (pData == null) {
+                pulDataLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulDataLen.* < need) {
+                pulDataLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = g.cipher.gcmDecrypt(in, pData.?[0..@intCast(need)]) catch |e| {
+                sess.endDecrypt(inst.allocator());
+                return mapCipherErr(e);
+            };
+            pulDataLen.* = @intCast(n);
+            sess.endDecrypt(inst.allocator());
             return ck.CKR_OK;
         },
         .rsa => |*r| {
@@ -629,36 +715,32 @@ pub fn C_Decrypt(hSession: ck.CK_SESSION_HANDLE, pEncryptedData: [*]ck.CK_BYTE, 
             }
             const sc = switch (rsaPrivateComponents(inst, r.key, ck.CKA_DECRYPT)) {
                 .err => |rv| {
-                    sess.endDecrypt();
+                    sess.endDecrypt(inst.allocator());
                     return rv;
                 },
                 .ok => |c| c,
             };
             const n = rsa.decrypt(sc, r.params, in, pData.?[0..@intCast(need)]) catch {
-                sess.endDecrypt();
+                sess.endDecrypt(inst.allocator());
                 return ck.CKR_ENCRYPTED_DATA_INVALID;
             };
             pulDataLen.* = @intCast(n);
-            sess.endDecrypt();
+            sess.endDecrypt(inst.allocator());
             return ck.CKR_OK;
         },
     }
 }
 
 pub fn C_DecryptUpdate(hSession: ck.CK_SESSION_HANDLE, pEncryptedPart: [*]ck.CK_BYTE, ulEncryptedPartLen: ck.CK_ULONG, pPart: ?[*]ck.CK_BYTE, pulPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     const op = if (sess.decrypt_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
-    const c = switch (op.*) {
-        .rsa => return ck.CKR_FUNCTION_NOT_SUPPORTED,
-        .aes => |*x| x,
-    };
-    if (c.mode == .gcm) return ck.CKR_FUNCTION_NOT_SUPPORTED;
-
     const in = part(pEncryptedPart, ulEncryptedPartLen);
-    const need = updateOutLen(c, in.len);
+    const need = switch (decUpdateNeed(op, in.len)) {
+        .err => |rv| return rv,
+        .ok => |n| n,
+    };
     if (pPart == null) {
         pulPartLen.* = need;
         return ck.CKR_OK;
@@ -667,43 +749,65 @@ pub fn C_DecryptUpdate(hSession: ck.CK_SESSION_HANDLE, pEncryptedPart: [*]ck.CK_
         pulPartLen.* = need;
         return ck.CKR_BUFFER_TOO_SMALL;
     }
-    pulPartLen.* = @intCast(c.decryptUpdate(in, pPart.?[0..@intCast(need)]));
+    const wrote = switch (decUpdateEmit(inst, op, in, pPart.?[0..@intCast(need)])) {
+        .err => |rv| {
+            sess.endDecrypt(inst.allocator());
+            return rv;
+        },
+        .ok => |n| n,
+    };
+    pulPartLen.* = @intCast(wrote);
     return ck.CKR_OK;
 }
 
 pub fn C_DecryptFinal(hSession: ck.CK_SESSION_HANDLE, pLastPart: ?[*]ck.CK_BYTE, pulLastPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     const op = if (sess.decrypt_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
-    const c = switch (op.*) {
+    switch (op.*) {
         .rsa => return ck.CKR_FUNCTION_NOT_SUPPORTED,
-        .aes => |*x| x,
-    };
-    if (c.mode == .gcm) return ck.CKR_FUNCTION_NOT_SUPPORTED;
-
-    const need: ck.CK_ULONG = if (c.mode == .cbc_pad) config.aes_block_len else 0;
-    if (pLastPart == null) {
-        pulLastPartLen.* = need;
-        return ck.CKR_OK;
+        .aes => |*c| {
+            const need: ck.CK_ULONG = if (c.mode == .cbc_pad) config.aes_block_len else 0;
+            if (pLastPart == null) {
+                pulLastPartLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulLastPartLen.* < need) {
+                pulLastPartLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = c.decryptFinal(pLastPart.?[0..@intCast(need)]) catch |e| {
+                sess.endDecrypt(inst.allocator());
+                return mapCipherErr(e);
+            };
+            pulLastPartLen.* = @intCast(n);
+            sess.endDecrypt(inst.allocator());
+            return ck.CKR_OK;
+        },
+        .gcm => |*g| {
+            const need: ck.CK_ULONG = @intCast(cipher.decryptOutLen(.gcm, g.len));
+            if (pLastPart == null) {
+                pulLastPartLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulLastPartLen.* < need) {
+                pulLastPartLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = g.cipher.gcmDecrypt(g.data(), pLastPart.?[0..@intCast(need)]) catch |e| {
+                sess.endDecrypt(inst.allocator());
+                return mapCipherErr(e);
+            };
+            pulLastPartLen.* = @intCast(n);
+            sess.endDecrypt(inst.allocator());
+            return ck.CKR_OK;
+        },
     }
-    if (pulLastPartLen.* < need) {
-        pulLastPartLen.* = need;
-        return ck.CKR_BUFFER_TOO_SMALL;
-    }
-    const n = c.decryptFinal(pLastPart.?[0..@intCast(need)]) catch |e| {
-        sess.endDecrypt();
-        return mapCipherErr(e);
-    };
-    pulLastPartLen.* = @intCast(n);
-    sess.endDecrypt();
-    return ck.CKR_OK;
 }
 
 pub fn C_DigestInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.digest_op != null) return ck.CKR_OPERATION_ACTIVE;
@@ -712,8 +816,7 @@ pub fn C_DigestInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM
 }
 
 pub fn C_Digest(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen: ck.CK_ULONG, pDigest: ?[*]ck.CK_BYTE, pulDigestLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.digest_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -731,8 +834,7 @@ pub fn C_Digest(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen:
 }
 
 pub fn C_DigestUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPartLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.digest_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -741,8 +843,7 @@ pub fn C_DigestUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPa
 }
 
 pub fn C_DigestKey(hSession: ck.CK_SESSION_HANDLE, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.digest_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -756,8 +857,7 @@ pub fn C_DigestKey(hSession: ck.CK_SESSION_HANDLE, hKey: ck.CK_OBJECT_HANDLE) ca
 }
 
 pub fn C_DigestFinal(hSession: ck.CK_SESSION_HANDLE, pDigest: ?[*]ck.CK_BYTE, pulDigestLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.digest_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -765,8 +865,7 @@ pub fn C_DigestFinal(hSession: ck.CK_SESSION_HANDLE, pDigest: ?[*]ck.CK_BYTE, pu
 }
 
 pub fn C_SignInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.sign_op != null) return ck.CKR_OPERATION_ACTIVE;
@@ -778,8 +877,7 @@ pub fn C_SignInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, 
 }
 
 pub fn C_Sign(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen: ck.CK_ULONG, pSignature: ?[*]ck.CK_BYTE, pulSignatureLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.sign_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -818,8 +916,7 @@ pub fn C_Sign(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen: c
 }
 
 pub fn C_SignUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPartLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.sign_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -832,8 +929,7 @@ pub fn C_SignUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPart
 }
 
 pub fn C_SignFinal(hSession: ck.CK_SESSION_HANDLE, pSignature: ?[*]ck.CK_BYTE, pulSignatureLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.sign_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -844,17 +940,57 @@ pub fn C_SignFinal(hSession: ck.CK_SESSION_HANDLE, pSignature: ?[*]ck.CK_BYTE, p
     return emitSign(inst, sess, pSignature, pulSignatureLen);
 }
 
-pub fn C_SignRecoverInit(_: ck.CK_SESSION_HANDLE, _: *ck.CK_MECHANISM, _: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_SignRecoverInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.sign_recover_op != null) return ck.CKR_OPERATION_ACTIVE;
+    if (pMechanism.mechanism != ck.CKM_RSA_PKCS) return ck.CKR_MECHANISM_INVALID;
+    const pc = switch (rsaPrivateComponents(inst, hKey, ck.CKA_SIGN_RECOVER)) {
+        .err => |rv| return rv,
+        .ok => |c| c,
+    };
+    sess.sign_recover_op = .{ .key = hKey, .out_len = pc.n.len };
+    return ck.CKR_OK;
 }
 
-pub fn C_SignRecover(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_SignRecover(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen: ck.CK_ULONG, pSignature: ?[*]ck.CK_BYTE, pulSignatureLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    const op = if (sess.sign_recover_op) |o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
+    const need: ck.CK_ULONG = @intCast(op.out_len);
+    if (pSignature == null) {
+        pulSignatureLen.* = need;
+        return ck.CKR_OK;
+    }
+    if (pulSignatureLen.* < need) {
+        pulSignatureLen.* = need;
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    const in = part(pData, ulDataLen);
+    if (in.len + rsa.pkcs1_v15_min_overhead > op.out_len) {
+        sess.endSignRecover();
+        return ck.CKR_DATA_LEN_RANGE;
+    }
+    const sc = switch (rsaPrivateComponents(inst, op.key, ck.CKA_SIGN_RECOVER)) {
+        .err => |rv| {
+            sess.endSignRecover();
+            return rv;
+        },
+        .ok => |c| c,
+    };
+    const n = rsa.sign(sc, .{ .scheme = .pkcs1, .digest = .none }, in, pSignature.?[0..@intCast(need)]) catch {
+        sess.endSignRecover();
+        return ck.CKR_FUNCTION_FAILED;
+    };
+    pulSignatureLen.* = @intCast(n);
+    sess.endSignRecover();
+    return ck.CKR_OK;
 }
 
 pub fn C_VerifyInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.verify_op != null) return ck.CKR_OPERATION_ACTIVE;
@@ -866,8 +1002,7 @@ pub fn C_VerifyInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM
 }
 
 pub fn C_Verify(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen: ck.CK_ULONG, pSignature: [*]ck.CK_BYTE, ulSignatureLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.verify_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -894,8 +1029,7 @@ pub fn C_Verify(hSession: ck.CK_SESSION_HANDLE, pData: [*]ck.CK_BYTE, ulDataLen:
 }
 
 pub fn C_VerifyUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPartLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.verify_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -908,8 +1042,7 @@ pub fn C_VerifyUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPa
 }
 
 pub fn C_VerifyFinal(hSession: ck.CK_SESSION_HANDLE, pSignature: [*]ck.CK_BYTE, ulSignatureLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     if (sess.verify_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
@@ -920,26 +1053,188 @@ pub fn C_VerifyFinal(hSession: ck.CK_SESSION_HANDLE, pSignature: [*]ck.CK_BYTE, 
     return finalizeVerify(sess, pSignature, ulSignatureLen);
 }
 
-pub fn C_VerifyRecoverInit(_: ck.CK_SESSION_HANDLE, _: *ck.CK_MECHANISM, _: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_VerifyRecoverInit(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.verify_recover_op != null) return ck.CKR_OPERATION_ACTIVE;
+    if (pMechanism.mechanism != ck.CKM_RSA_PKCS) return ck.CKR_MECHANISM_INVALID;
+    const pc = switch (rsaPublicComponents(inst, hKey, ck.CKA_VERIFY_RECOVER)) {
+        .err => |rv| return rv,
+        .ok => |c| c,
+    };
+    sess.verify_recover_op = .{ .key = hKey, .out_len = pc.n.len };
+    return ck.CKR_OK;
 }
 
-pub fn C_VerifyRecover(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_VerifyRecover(hSession: ck.CK_SESSION_HANDLE, pSignature: [*]ck.CK_BYTE, ulSignatureLen: ck.CK_ULONG, pData: ?[*]ck.CK_BYTE, pulDataLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    const op = if (sess.verify_recover_op) |o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
+    if (pData == null) {
+        pulDataLen.* = @intCast(op.out_len);
+        return ck.CKR_OK;
+    }
+    if (ulSignatureLen != op.out_len) {
+        sess.endVerifyRecover();
+        return ck.CKR_SIGNATURE_LEN_RANGE;
+    }
+    const pc = switch (rsaPublicComponents(inst, op.key, ck.CKA_VERIFY_RECOVER)) {
+        .err => |rv| {
+            sess.endVerifyRecover();
+            return rv;
+        },
+        .ok => |c| c,
+    };
+    var tmp: [rsa.max_modulus_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &tmp);
+    const m = rsa.recover(pc, part(pSignature, ulSignatureLen), &tmp) catch {
+        sess.endVerifyRecover();
+        return ck.CKR_SIGNATURE_INVALID;
+    };
+    if (pulDataLen.* < m) {
+        pulDataLen.* = @intCast(m);
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    @memcpy(pData.?[0..m], tmp[0..m]);
+    pulDataLen.* = @intCast(m);
+    sess.endVerifyRecover();
+    return ck.CKR_OK;
 }
 
-pub fn C_DigestEncryptUpdate(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_DigestEncryptUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPartLen: ck.CK_ULONG, pEncryptedPart: ?[*]ck.CK_BYTE, pulEncryptedPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.digest_op == null or sess.encrypt_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
+    const op = &sess.encrypt_op.?;
+    const in = part(pPart, ulPartLen);
+    const need = switch (encUpdateNeed(op, in.len)) {
+        .err => |rv| return rv,
+        .ok => |n| n,
+    };
+    if (pEncryptedPart == null) {
+        pulEncryptedPartLen.* = need;
+        return ck.CKR_OK;
+    }
+    if (pulEncryptedPartLen.* < need) {
+        pulEncryptedPartLen.* = need;
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    sess.digest_op.?.update(in);
+    const wrote = switch (encUpdateEmit(inst, op, in, pEncryptedPart.?[0..@intCast(need)])) {
+        .err => |rv| {
+            sess.endEncrypt(inst.allocator());
+            return rv;
+        },
+        .ok => |n| n,
+    };
+    pulEncryptedPartLen.* = @intCast(wrote);
+    return ck.CKR_OK;
 }
 
-pub fn C_DecryptDigestUpdate(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_DecryptDigestUpdate(hSession: ck.CK_SESSION_HANDLE, pEncryptedPart: [*]ck.CK_BYTE, ulEncryptedPartLen: ck.CK_ULONG, pPart: ?[*]ck.CK_BYTE, pulPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.decrypt_op == null or sess.digest_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
+    const op = &sess.decrypt_op.?;
+    if (!decryptSideDualOk(op)) return ck.CKR_FUNCTION_NOT_SUPPORTED;
+    const in = part(pEncryptedPart, ulEncryptedPartLen);
+    const need = switch (decUpdateNeed(op, in.len)) {
+        .err => |rv| return rv,
+        .ok => |n| n,
+    };
+    if (pPart == null) {
+        pulPartLen.* = need;
+        return ck.CKR_OK;
+    }
+    if (pulPartLen.* < need) {
+        pulPartLen.* = need;
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    const out = pPart.?[0..@intCast(need)];
+    const wrote = switch (decUpdateEmit(inst, op, in, out)) {
+        .err => |rv| {
+            sess.endDecrypt(inst.allocator());
+            return rv;
+        },
+        .ok => |n| n,
+    };
+    sess.digest_op.?.update(out[0..wrote]);
+    pulPartLen.* = @intCast(wrote);
+    return ck.CKR_OK;
 }
 
-pub fn C_SignEncryptUpdate(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_SignEncryptUpdate(hSession: ck.CK_SESSION_HANDLE, pPart: [*]ck.CK_BYTE, ulPartLen: ck.CK_ULONG, pEncryptedPart: ?[*]ck.CK_BYTE, pulEncryptedPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.sign_op == null or sess.encrypt_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
+    switch (sess.sign_op.?) {
+        .rsa => return ck.CKR_FUNCTION_NOT_SUPPORTED,
+        else => {},
+    }
+    const op = &sess.encrypt_op.?;
+    const in = part(pPart, ulPartLen);
+    const need = switch (encUpdateNeed(op, in.len)) {
+        .err => |rv| return rv,
+        .ok => |n| n,
+    };
+    if (pEncryptedPart == null) {
+        pulEncryptedPartLen.* = need;
+        return ck.CKR_OK;
+    }
+    if (pulEncryptedPartLen.* < need) {
+        pulEncryptedPartLen.* = need;
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    sess.sign_op.?.update(in);
+    const wrote = switch (encUpdateEmit(inst, op, in, pEncryptedPart.?[0..@intCast(need)])) {
+        .err => |rv| {
+            sess.endEncrypt(inst.allocator());
+            return rv;
+        },
+        .ok => |n| n,
+    };
+    pulEncryptedPartLen.* = @intCast(wrote);
+    return ck.CKR_OK;
 }
 
-pub fn C_DecryptVerifyUpdate(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_DecryptVerifyUpdate(hSession: ck.CK_SESSION_HANDLE, pEncryptedPart: [*]ck.CK_BYTE, ulEncryptedPartLen: ck.CK_ULONG, pPart: ?[*]ck.CK_BYTE, pulPartLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.decrypt_op == null or sess.verify_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
+    const op = &sess.decrypt_op.?;
+    if (!decryptSideDualOk(op)) return ck.CKR_FUNCTION_NOT_SUPPORTED;
+    switch (sess.verify_op.?) {
+        .rsa => return ck.CKR_FUNCTION_NOT_SUPPORTED,
+        else => {},
+    }
+    const in = part(pEncryptedPart, ulEncryptedPartLen);
+    const need = switch (decUpdateNeed(op, in.len)) {
+        .err => |rv| return rv,
+        .ok => |n| n,
+    };
+    if (pPart == null) {
+        pulPartLen.* = need;
+        return ck.CKR_OK;
+    }
+    if (pulPartLen.* < need) {
+        pulPartLen.* = need;
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    const out = pPart.?[0..@intCast(need)];
+    const wrote = switch (decUpdateEmit(inst, op, in, out)) {
+        .err => |rv| {
+            sess.endDecrypt(inst.allocator());
+            return rv;
+        },
+        .ok => |n| n,
+    };
+    sess.verify_op.?.update(out[0..wrote]);
+    pulPartLen.* = @intCast(wrote);
+    return ck.CKR_OK;
 }

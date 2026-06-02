@@ -44,6 +44,10 @@ pub fn C_CancelFunction(_: ck.CK_SESSION_HANDLE) callconv(.c) ck.CK_RV {
     return ck.CKR_FUNCTION_NOT_PARALLEL;
 }
 
-pub fn C_WaitForSlotEvent(_: ck.CK_FLAGS, _: *ck.CK_SLOT_ID, _: ?*anyopaque) callconv(.c) ck.CK_RV {
+pub fn C_WaitForSlotEvent(flags: ck.CK_FLAGS, pSlot: *ck.CK_SLOT_ID, pReserved: ?*anyopaque) callconv(.c) ck.CK_RV {
+    _ = pSlot;
+    if (!state.isInitialized()) return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    if (pReserved != null) return ck.CKR_ARGUMENTS_BAD;
+    if ((flags & ck.CKF_DONT_BLOCK) != 0) return ck.CKR_NO_EVENT;
     return ck.CKR_FUNCTION_NOT_SUPPORTED;
 }

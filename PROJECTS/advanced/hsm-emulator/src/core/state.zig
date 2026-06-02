@@ -49,8 +49,13 @@ var present: bool = false;
 var inflight: usize = 0;
 var generation: u64 = 0;
 
-pub fn current() ?*Instance {
-    return if (@atomicLoad(bool, &present, .acquire)) &storage else null;
+pub fn acquire() ?*Instance {
+    mutex.lock();
+    if (!@atomicLoad(bool, &present, .acquire)) {
+        mutex.unlock();
+        return null;
+    }
+    return &storage;
 }
 
 pub fn isInitialized() bool {
@@ -87,11 +92,12 @@ pub fn finalize() ck.CK_RV {
 
     mutex.lock();
     defer mutex.unlock();
-    storage.sessions.wipeAll();
+    storage.sessions.wipeAll(storage.allocator());
     storage.wipeMasterKey();
     storage.objects.deinit(storage.allocator());
     storage.threaded.deinit();
-    _ = storage.debug_alloc.deinit();
+    const leak = storage.debug_alloc.deinit();
+    if (builtin.mode == .Debug and leak == .leak) @panic("hsm: allocator leak detected at C_Finalize");
     return ck.CKR_OK;
 }
 

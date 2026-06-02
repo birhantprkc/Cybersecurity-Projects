@@ -72,6 +72,8 @@ pub extern fn EVP_PKEY_sign_init(ctx: ?*EVP_PKEY_CTX) c_int;
 pub extern fn EVP_PKEY_sign(ctx: ?*EVP_PKEY_CTX, sig: ?[*]u8, siglen: *usize, tbs: [*]const u8, tbslen: usize) c_int;
 pub extern fn EVP_PKEY_verify_init(ctx: ?*EVP_PKEY_CTX) c_int;
 pub extern fn EVP_PKEY_verify(ctx: ?*EVP_PKEY_CTX, sig: [*]const u8, siglen: usize, tbs: [*]const u8, tbslen: usize) c_int;
+pub extern fn EVP_PKEY_verify_recover_init(ctx: ?*EVP_PKEY_CTX) c_int;
+pub extern fn EVP_PKEY_verify_recover(ctx: ?*EVP_PKEY_CTX, rout: ?[*]u8, routlen: *usize, sig: [*]const u8, siglen: usize) c_int;
 
 pub extern fn EVP_PKEY_encrypt_init(ctx: ?*EVP_PKEY_CTX) c_int;
 pub extern fn EVP_PKEY_encrypt(ctx: ?*EVP_PKEY_CTX, out: ?[*]u8, outlen: *usize, in: [*]const u8, inlen: usize) c_int;

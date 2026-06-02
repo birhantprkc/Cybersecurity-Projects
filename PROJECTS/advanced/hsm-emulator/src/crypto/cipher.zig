@@ -70,6 +70,7 @@ pub const Cipher = struct {
 
     fn cbcEncStep(self: *Cipher, in16: *const [block]u8, out16: *[block]u8) void {
         var x: [block]u8 = undefined;
+        defer std.crypto.secureZero(u8, &x);
         for (0..block) |j| x[j] = in16[j] ^ self.chain[j];
         encBlockRaw(self.key(), &x, out16);
         self.chain = out16.*;
@@ -77,6 +78,7 @@ pub const Cipher = struct {
 
     fn cbcDecStep(self: *Cipher, in16: *const [block]u8, out16: *[block]u8) void {
         var d: [block]u8 = undefined;
+        defer std.crypto.secureZero(u8, &d);
         decBlockRaw(self.key(), in16, &d);
         for (0..block) |j| out16[j] = d[j] ^ self.chain[j];
         self.chain = in16.*;
@@ -142,6 +144,7 @@ pub const Cipher = struct {
         if (self.mode == .cbc) return 0;
         if (!self.has_held) return Error.EncryptedDataLenRange;
         var pt: [block]u8 = undefined;
+        defer std.crypto.secureZero(u8, &pt);
         self.cbcDecStep(&self.held, &pt);
         self.has_held = false;
         const padlen = pt[block - 1];

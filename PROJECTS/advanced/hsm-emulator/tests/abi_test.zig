@@ -82,6 +82,8 @@ test "hand-coded structs match OASIS-translated layout byte-for-byte" {
     try expectSameLayout(ck.CK_ATTRIBUTE, p11c.CK_ATTRIBUTE);
     try expectSameLayout(ck.CK_MECHANISM, p11c.CK_MECHANISM);
     try expectSameLayout(ck.CK_GCM_PARAMS, p11c.CK_GCM_PARAMS);
+    try expectSameLayout(ck.CK_RSA_PKCS_PSS_PARAMS, p11c.CK_RSA_PKCS_PSS_PARAMS);
+    try expectSameLayout(ck.CK_RSA_PKCS_OAEP_PARAMS, p11c.CK_RSA_PKCS_OAEP_PARAMS);
     try expectSameLayout(ck.CK_ECDH1_DERIVE_PARAMS, p11c.CK_ECDH1_DERIVE_PARAMS);
     try expectSameLayout(ck.CK_DATE, p11c.CK_DATE);
     try expectSameLayout(ck.CK_C_INITIALIZE_ARGS, p11c.CK_C_INITIALIZE_ARGS);

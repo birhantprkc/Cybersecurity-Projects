@@ -19,6 +19,10 @@ fn pinSlice(p: ?[*]ck.CK_UTF8CHAR, len: ck.CK_ULONG) []const u8 {
     return if (p) |ptr| ptr[0..@intCast(len)] else &.{};
 }
 
+fn pinLenOk(len: ck.CK_ULONG) bool {
+    return len >= config.min_pin_len and len <= config.max_pin_len;
+}
+
 fn labelFrom(p: ?[*]ck.CK_UTF8CHAR) [config.label_len]u8 {
     var out: [config.label_len]u8 = @splat(' ');
     if (p) |lp| @memcpy(&out, lp[0..config.label_len]);
@@ -63,11 +67,9 @@ pub fn C_GetSlotInfo(slotID: ck.CK_SLOT_ID, pInfo: *ck.CK_SLOT_INFO) callconv(.c
 }
 
 pub fn C_GetTokenInfo(slotID: ck.CK_SLOT_ID, pInfo: *ck.CK_TOKEN_INFO) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    if (slotID != config.slot_id) return ck.CKR_SLOT_ID_INVALID;
-
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
+    if (slotID != config.slot_id) return ck.CKR_SLOT_ID_INVALID;
 
     var flags: ck.CK_FLAGS = ck.CKF_RNG | ck.CKF_LOGIN_REQUIRED;
     if (inst.token.initialized) flags |= ck.CKF_TOKEN_INITIALIZED;
@@ -167,7 +169,7 @@ pub fn C_GetMechanismInfo(slotID: ck.CK_SLOT_ID, mechType: ck.CK_MECHANISM_TYPE,
         ck.CKM_RSA_PKCS => .{
             .ulMinKeySize = config.rsa_min_key_bits,
             .ulMaxKeySize = config.rsa_max_key_bits,
-            .flags = ck.CKF_SIGN | ck.CKF_VERIFY | ck.CKF_ENCRYPT | ck.CKF_DECRYPT,
+            .flags = ck.CKF_SIGN | ck.CKF_VERIFY | ck.CKF_ENCRYPT | ck.CKF_DECRYPT | ck.CKF_SIGN_RECOVER | ck.CKF_VERIFY_RECOVER,
         },
         ck.CKM_SHA256_RSA_PKCS, ck.CKM_RSA_PKCS_PSS, ck.CKM_SHA256_RSA_PKCS_PSS => .{
             .ulMinKeySize = config.rsa_min_key_bits,
@@ -185,15 +187,21 @@ pub fn C_GetMechanismInfo(slotID: ck.CK_SLOT_ID, mechType: ck.CK_MECHANISM_TYPE,
 }
 
 pub fn C_InitToken(slotID: ck.CK_SLOT_ID, pPin: ?[*]ck.CK_UTF8CHAR, ulPinLen: ck.CK_ULONG, pLabel: ?[*]ck.CK_UTF8CHAR) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    if (slotID != config.slot_id) return ck.CKR_SLOT_ID_INVALID;
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    if (slotID != config.slot_id) {
+        state.mutex.unlock();
+        return ck.CKR_SLOT_ID_INVALID;
+    }
 
-    state.mutex.lock();
     if (inst.sessions.anyOpen()) {
         state.mutex.unlock();
         return ck.CKR_SESSION_EXISTS;
     }
     const was_init = inst.token.initialized;
+    if (!was_init and !pinLenOk(ulPinLen)) {
+        state.mutex.unlock();
+        return ck.CKR_PIN_LEN_RANGE;
+    }
     if (was_init and inst.token.so_fail >= config.login_max_attempts) {
         state.mutex.unlock();
         return ck.CKR_PIN_LOCKED;
@@ -267,9 +275,8 @@ pub fn C_InitToken(slotID: ck.CK_SLOT_ID, pPin: ?[*]ck.CK_UTF8CHAR, ulPinLen: ck
 }
 
 pub fn C_InitPIN(hSession: ck.CK_SESSION_HANDLE, pPin: ?[*]ck.CK_UTF8CHAR, ulPinLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
 
-    state.mutex.lock();
     if (inst.sessions.get(hSession) == null) {
         state.mutex.unlock();
         return ck.CKR_SESSION_HANDLE_INVALID;
@@ -277,6 +284,10 @@ pub fn C_InitPIN(hSession: ck.CK_SESSION_HANDLE, pPin: ?[*]ck.CK_UTF8CHAR, ulPin
     if (inst.logged_in != ck.CKU_SO) {
         state.mutex.unlock();
         return ck.CKR_USER_NOT_LOGGED_IN;
+    }
+    if (!pinLenOk(ulPinLen)) {
+        state.mutex.unlock();
+        return ck.CKR_PIN_LEN_RANGE;
     }
     _ = state.cryptoBegin();
     const io = inst.io();
@@ -318,9 +329,8 @@ pub fn C_InitPIN(hSession: ck.CK_SESSION_HANDLE, pPin: ?[*]ck.CK_UTF8CHAR, ulPin
 }
 
 pub fn C_SetPIN(hSession: ck.CK_SESSION_HANDLE, pOldPin: ?[*]ck.CK_UTF8CHAR, ulOldLen: ck.CK_ULONG, pNewPin: ?[*]ck.CK_UTF8CHAR, ulNewLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
 
-    state.mutex.lock();
     const sess = inst.sessions.get(hSession) orelse {
         state.mutex.unlock();
         return ck.CKR_SESSION_HANDLE_INVALID;
@@ -348,6 +358,10 @@ pub fn C_SetPIN(hSession: ck.CK_SESSION_HANDLE, pOldPin: ?[*]ck.CK_UTF8CHAR, ulO
         salt = u.salt;
         hash = u.hash;
         wrapped_mk = inst.token.user_mk;
+    }
+    if (!pinLenOk(ulNewLen)) {
+        state.mutex.unlock();
+        return ck.CKR_PIN_LEN_RANGE;
     }
     const gen = state.cryptoBegin();
     const io = inst.io();

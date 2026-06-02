@@ -8,6 +8,7 @@ const ossl = @import("openssl.zig");
 
 pub const max_modulus_bytes: usize = config.rsa_max_key_bits / 8;
 pub const max_sig_bytes: usize = max_modulus_bytes;
+pub const pkcs1_v15_min_overhead: usize = 11;
 const component_count = 8;
 
 pub const Error = error{Crypto};
@@ -235,6 +236,18 @@ pub fn verify(pc: PublicComponents, p: SignParams, data: []const u8, sig: []cons
     return if (ossl.EVP_PKEY_verify(ctx, sig.ptr, sig.len, data.ptr, data.len) == 1) .ok else .invalid;
 }
 
+pub fn recover(pc: PublicComponents, sig: []const u8, out: []u8) Error!usize {
+    const pkey = try buildPublic(pc);
+    defer ossl.EVP_PKEY_free(pkey);
+    const ctx = ossl.EVP_PKEY_CTX_new(pkey, null) orelse return Error.Crypto;
+    defer ossl.EVP_PKEY_CTX_free(ctx);
+    if (ossl.EVP_PKEY_verify_recover_init(ctx) <= 0) return Error.Crypto;
+    if (ossl.EVP_PKEY_CTX_set_rsa_padding(ctx, ossl.pad_pkcs1) <= 0) return Error.Crypto;
+    var outlen: usize = out.len;
+    if (ossl.EVP_PKEY_verify_recover(ctx, out.ptr, &outlen, sig.ptr, sig.len) <= 0) return Error.Crypto;
+    return outlen;
+}
+
 fn applyCryptPadding(ctx: ?*ossl.EVP_PKEY_CTX, p: CryptParams) Error!void {
     if (p.scheme == .oaep) {
         if (ossl.EVP_PKEY_CTX_set_rsa_padding(ctx, ossl.pad_oaep) <= 0) return Error.Crypto;
@@ -339,6 +352,18 @@ test "PKCS#1 v1.5 encrypt/decrypt round-trips" {
     var pt: [max_modulus_bytes]u8 = undefined;
     const pn = try decrypt(testPriv(&g), params, ct[0..cn], &pt);
     try std.testing.expectEqualSlices(u8, msg, pt[0..pn]);
+}
+
+test "RSA sign-recover then verify-recover returns the original message" {
+    var g = try generate(config.rsa_min_key_bits);
+    defer g.zeroize();
+    const params: SignParams = .{ .scheme = .pkcs1, .digest = .none };
+    const msg = "recoverable enterprise payload";
+    var sig: [max_sig_bytes]u8 = undefined;
+    const n = try sign(testPriv(&g), params, msg, &sig);
+    var rec: [max_modulus_bytes]u8 = undefined;
+    const m = try recover(testPub(&g), sig[0..n], &rec);
+    try std.testing.expectEqualSlices(u8, msg, rec[0..m]);
 }
 
 test "OAEP-SHA256 encrypt/decrypt round-trips" {

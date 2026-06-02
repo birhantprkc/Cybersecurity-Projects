@@ -63,8 +63,12 @@ pub const gcm_iv_bits: ck.CK_ULONG = 96;
 pub const gcm_tag_len: usize = 16;
 pub const gcm_tag_bits: ck.CK_ULONG = 128;
 pub const max_gcm_aad_len: usize = 256;
+pub const max_gcm_stream_len: usize = 16 * 1024 * 1024;
 
 pub const master_key_len: usize = 32;
+
+pub const op_state_version: u8 = 1;
+pub const op_state_header_len: usize = 2;
 
 pub const supported_mechanisms = [_]ck.CK_MECHANISM_TYPE{
     ck.CKM_SHA256,

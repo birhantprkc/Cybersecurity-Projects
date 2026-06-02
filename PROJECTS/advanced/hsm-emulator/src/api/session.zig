@@ -9,6 +9,7 @@ const pin = @import("../crypto/pin.zig");
 const keystore = @import("../crypto/keystore.zig");
 const token = @import("../core/token.zig");
 const object_store = @import("../core/object_store.zig");
+const digest = @import("../crypto/digest.zig");
 
 fn pinSlice(p: ?[*]ck.CK_UTF8CHAR, len: ck.CK_ULONG) []const u8 {
     return if (p) |ptr| ptr[0..@intCast(len)] else &.{};
@@ -26,12 +27,10 @@ fn sessionState(flags: ck.CK_FLAGS, logged_in: ?ck.CK_USER_TYPE) ck.CK_STATE {
 pub fn C_OpenSession(slotID: ck.CK_SLOT_ID, flags: ck.CK_FLAGS, pApplication: ?*anyopaque, notify: ck.CK_NOTIFY, phSession: *ck.CK_SESSION_HANDLE) callconv(.c) ck.CK_RV {
     _ = pApplication;
     _ = notify;
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
     if (slotID != config.slot_id) return ck.CKR_SLOT_ID_INVALID;
     if ((flags & ck.CKF_SERIAL_SESSION) == 0) return ck.CKR_SESSION_PARALLEL_NOT_SUPPORTED;
-
-    state.mutex.lock();
-    defer state.mutex.unlock();
     if ((flags & ck.CKF_RW_SESSION) == 0 and inst.logged_in == ck.CKU_SO) {
         return ck.CKR_SESSION_READ_WRITE_SO_EXISTS;
     }
@@ -41,10 +40,9 @@ pub fn C_OpenSession(slotID: ck.CK_SLOT_ID, flags: ck.CK_FLAGS, pApplication: ?*
 }
 
 pub fn C_CloseSession(hSession: ck.CK_SESSION_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
-    if (!inst.sessions.close(hSession)) return ck.CKR_SESSION_HANDLE_INVALID;
+    if (!inst.sessions.close(inst.allocator(), hSession)) return ck.CKR_SESSION_HANDLE_INVALID;
     if (!inst.sessions.anyOpen()) {
         inst.relock();
         inst.logged_in = null;
@@ -53,19 +51,17 @@ pub fn C_CloseSession(hSession: ck.CK_SESSION_HANDLE) callconv(.c) ck.CK_RV {
 }
 
 pub fn C_CloseAllSessions(slotID: ck.CK_SLOT_ID) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    if (slotID != config.slot_id) return ck.CKR_SLOT_ID_INVALID;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
-    inst.sessions.closeAll(slotID);
+    if (slotID != config.slot_id) return ck.CKR_SLOT_ID_INVALID;
+    inst.sessions.closeAll(inst.allocator(), slotID);
     inst.relock();
     inst.logged_in = null;
     return ck.CKR_OK;
 }
 
 pub fn C_GetSessionInfo(hSession: ck.CK_SESSION_HANDLE, pInfo: *ck.CK_SESSION_INFO) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     const s = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
     pInfo.* = .{
@@ -77,19 +73,56 @@ pub fn C_GetSessionInfo(hSession: ck.CK_SESSION_HANDLE, pInfo: *ck.CK_SESSION_IN
     return ck.CKR_OK;
 }
 
-pub fn C_GetOperationState(_: ck.CK_SESSION_HANDLE, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_GetOperationState(hSession: ck.CK_SESSION_HANDLE, pOperationState: ?[*]ck.CK_BYTE, pulOperationStateLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (sess.sign_op != null or sess.verify_op != null or sess.encrypt_op != null or
+        sess.decrypt_op != null or sess.sign_recover_op != null or sess.verify_recover_op != null)
+    {
+        return ck.CKR_STATE_UNSAVEABLE;
+    }
+    const d = if (sess.digest_op) |*o| o else return ck.CKR_OPERATION_NOT_INITIALIZED;
+    const total: ck.CK_ULONG = @intCast(config.op_state_header_len + d.stateLen());
+    if (pOperationState == null) {
+        pulOperationStateLen.* = total;
+        return ck.CKR_OK;
+    }
+    if (pulOperationStateLen.* < total) {
+        pulOperationStateLen.* = total;
+        return ck.CKR_BUFFER_TOO_SMALL;
+    }
+    const out = pOperationState.?[0..@intCast(total)];
+    out[0] = config.op_state_version;
+    out[1] = d.stateTag();
+    d.writeState(out[config.op_state_header_len..]);
+    pulOperationStateLen.* = total;
+    return ck.CKR_OK;
 }
 
-pub fn C_SetOperationState(_: ck.CK_SESSION_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: ck.CK_OBJECT_HANDLE, _: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+pub fn C_SetOperationState(hSession: ck.CK_SESSION_HANDLE, pOperationState: [*]ck.CK_BYTE, ulOperationStateLen: ck.CK_ULONG, hEncryptionKey: ck.CK_OBJECT_HANDLE, hAuthenticationKey: ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (hEncryptionKey != ck.CK_INVALID_HANDLE or hAuthenticationKey != ck.CK_INVALID_HANDLE) {
+        return ck.CKR_KEY_NOT_NEEDED;
+    }
+    const blob = pOperationState[0..@intCast(ulOperationStateLen)];
+    if (blob.len < config.op_state_header_len) return ck.CKR_SAVED_STATE_INVALID;
+    if (blob[0] != config.op_state_version) return ck.CKR_SAVED_STATE_INVALID;
+    const restored = digest.Hasher.fromState(blob[1], blob[config.op_state_header_len..]) orelse return ck.CKR_SAVED_STATE_INVALID;
+    sess.endDigest();
+    sess.digest_op = restored;
+    return ck.CKR_OK;
 }
 
 pub fn C_Login(hSession: ck.CK_SESSION_HANDLE, userType: ck.CK_USER_TYPE, pPin: ?[*]ck.CK_UTF8CHAR, ulPinLen: ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    if (userType != ck.CKU_SO and userType != ck.CKU_USER) return ck.CKR_USER_TYPE_INVALID;
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    if (userType != ck.CKU_SO and userType != ck.CKU_USER) {
+        state.mutex.unlock();
+        return ck.CKR_USER_TYPE_INVALID;
+    }
 
-    state.mutex.lock();
     if (inst.sessions.get(hSession) == null) {
         state.mutex.unlock();
         return ck.CKR_SESSION_HANDLE_INVALID;
@@ -182,8 +215,7 @@ pub fn C_Login(hSession: ck.CK_SESSION_HANDLE, userType: ck.CK_USER_TYPE, pPin: 
 }
 
 pub fn C_Logout(hSession: ck.CK_SESSION_HANDLE) callconv(.c) ck.CK_RV {
-    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
-    state.mutex.lock();
+    const inst = state.acquire() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
     defer state.mutex.unlock();
     if (inst.sessions.get(hSession) == null) return ck.CKR_SESSION_HANDLE_INVALID;
     if (inst.logged_in == null) return ck.CKR_USER_NOT_LOGGED_IN;

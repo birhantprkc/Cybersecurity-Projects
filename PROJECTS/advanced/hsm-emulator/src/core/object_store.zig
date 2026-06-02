@@ -91,6 +91,7 @@ pub const Object = struct {
             const dup = try allocator.dupe(u8, bytes);
             secureFree(allocator, a.value);
             a.value = dup;
+            a.sealed = false;
             return;
         }
         if (self.attrs.items.len >= config.max_attributes_per_object) return error.TooManyAttributes;
@@ -383,6 +384,18 @@ test "set replaces an existing attribute and reports size" {
     try std.testing.expectEqual(@as(usize, 1), obj.attrs.items.len);
     try std.testing.expectEqualSlices(u8, "second-value", obj.get(ck.CKA_LABEL).?);
     try std.testing.expectEqual(@as(ck.CK_ULONG, "second-value".len), obj.sizeBytes());
+}
+
+test "set on an existing attribute clears a stale sealed flag" {
+    const a = std.testing.allocator;
+    var obj: Object = .{};
+    defer obj.deinit(a);
+
+    try obj.set(a, ck.CKA_VALUE, "ciphertext-placeholder");
+    obj.findPtr(ck.CKA_VALUE).?.sealed = true;
+    try obj.set(a, ck.CKA_VALUE, "fresh-plaintext");
+    try std.testing.expect(!obj.findPtr(ck.CKA_VALUE).?.sealed);
+    try std.testing.expectEqualSlices(u8, "fresh-plaintext", obj.get(ck.CKA_VALUE).?);
 }
 
 test "bool and class helpers read CK_BBOOL semantics" {

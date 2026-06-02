@@ -29,6 +29,50 @@ pub const RsaCrypt = struct {
     out_len: usize,
 };
 
+pub const RsaRecover = struct {
+    key: ck.CK_OBJECT_HANDLE,
+    out_len: usize,
+};
+
+pub const GcmStream = struct {
+    cipher: cipher.Cipher,
+    buf: ?[]u8 = null,
+    len: usize = 0,
+
+    pub fn append(self: *GcmStream, allocator: std.mem.Allocator, bytes: []const u8) error{ OutOfMemory, TooLarge }!void {
+        if (bytes.len == 0) return;
+        const needed = self.len + bytes.len;
+        if (needed > config.max_gcm_stream_len) return error.TooLarge;
+        if (self.buf == null or self.buf.?.len < needed) {
+            var new_cap: usize = if (self.buf) |b| b.len else 256;
+            while (new_cap < needed) new_cap *|= 2;
+            if (new_cap > config.max_gcm_stream_len) new_cap = config.max_gcm_stream_len;
+            const fresh = try allocator.alloc(u8, new_cap);
+            if (self.buf) |old| {
+                @memcpy(fresh[0..self.len], old[0..self.len]);
+                std.crypto.secureZero(u8, old);
+                allocator.free(old);
+            }
+            self.buf = fresh;
+        }
+        @memcpy(self.buf.?[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn data(self: *const GcmStream) []const u8 {
+        return if (self.buf) |b| b[0..self.len] else &.{};
+    }
+
+    pub fn deinit(self: *GcmStream, allocator: std.mem.Allocator) void {
+        if (self.buf) |b| {
+            std.crypto.secureZero(u8, b);
+            allocator.free(b);
+        }
+        self.buf = null;
+        self.len = 0;
+    }
+};
+
 pub const SignOp = union(enum) {
     mac: mac.Mac,
     ec: ecdsa.SignState,
@@ -67,18 +111,28 @@ pub const VerifyOp = union(enum) {
 
 pub const EncryptOp = union(enum) {
     aes: cipher.Cipher,
+    gcm: GcmStream,
     rsa: RsaCrypt,
 
-    pub fn zeroize(self: *EncryptOp) void {
+    pub fn deinit(self: *EncryptOp, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .gcm => |*g| g.deinit(allocator),
+            else => {},
+        }
         std.crypto.secureZero(u8, std.mem.asBytes(self));
     }
 };
 
 pub const DecryptOp = union(enum) {
     aes: cipher.Cipher,
+    gcm: GcmStream,
     rsa: RsaCrypt,
 
-    pub fn zeroize(self: *DecryptOp) void {
+    pub fn deinit(self: *DecryptOp, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .gcm => |*g| g.deinit(allocator),
+            else => {},
+        }
         std.crypto.secureZero(u8, std.mem.asBytes(self));
     }
 };
@@ -92,6 +146,8 @@ pub const Session = struct {
     verify_op: ?VerifyOp = null,
     encrypt_op: ?EncryptOp = null,
     decrypt_op: ?DecryptOp = null,
+    sign_recover_op: ?RsaRecover = null,
+    verify_recover_op: ?RsaRecover = null,
 
     pub fn endDigest(self: *Session) void {
         if (self.digest_op) |*o| std.crypto.secureZero(u8, std.mem.asBytes(o));
@@ -108,14 +164,35 @@ pub const Session = struct {
         self.verify_op = null;
     }
 
-    pub fn endEncrypt(self: *Session) void {
-        if (self.encrypt_op) |*o| o.zeroize();
+    pub fn endEncrypt(self: *Session, allocator: std.mem.Allocator) void {
+        if (self.encrypt_op) |*o| o.deinit(allocator);
         self.encrypt_op = null;
     }
 
-    pub fn endDecrypt(self: *Session) void {
-        if (self.decrypt_op) |*o| o.zeroize();
+    pub fn endDecrypt(self: *Session, allocator: std.mem.Allocator) void {
+        if (self.decrypt_op) |*o| o.deinit(allocator);
         self.decrypt_op = null;
+    }
+
+    pub fn endSignRecover(self: *Session) void {
+        if (self.sign_recover_op) |*o| std.crypto.secureZero(u8, std.mem.asBytes(o));
+        self.sign_recover_op = null;
+    }
+
+    pub fn endVerifyRecover(self: *Session) void {
+        if (self.verify_recover_op) |*o| std.crypto.secureZero(u8, std.mem.asBytes(o));
+        self.verify_recover_op = null;
+    }
+
+    pub fn freeHeap(self: *Session, allocator: std.mem.Allocator) void {
+        if (self.encrypt_op) |*o| switch (o.*) {
+            .gcm => |*g| g.deinit(allocator),
+            else => {},
+        };
+        if (self.decrypt_op) |*o| switch (o.*) {
+            .gcm => |*g| g.deinit(allocator),
+            else => {},
+        };
     }
 };
 
@@ -139,18 +216,20 @@ pub const Table = struct {
         return null;
     }
 
-    pub fn close(self: *Table, h: ck.CK_SESSION_HANDLE) bool {
+    pub fn close(self: *Table, allocator: std.mem.Allocator, h: ck.CK_SESSION_HANDLE) bool {
         if (h == 0 or h > config.max_sessions) return false;
         if (self.slots[h - 1] == null) return false;
+        if (self.slots[h - 1]) |*s| s.freeHeap(allocator);
         std.crypto.secureZero(u8, std.mem.asBytes(&self.slots[h - 1]));
         self.slots[h - 1] = null;
         return true;
     }
 
-    pub fn closeAll(self: *Table, slot: ck.CK_SLOT_ID) void {
+    pub fn closeAll(self: *Table, allocator: std.mem.Allocator, slot: ck.CK_SLOT_ID) void {
         for (&self.slots) |*s| {
             if (s.*) |*sp| {
                 if (sp.slot == slot) {
+                    sp.freeHeap(allocator);
                     std.crypto.secureZero(u8, std.mem.asBytes(s));
                     s.* = null;
                 }
@@ -158,7 +237,10 @@ pub const Table = struct {
         }
     }
 
-    pub fn wipeAll(self: *Table) void {
+    pub fn wipeAll(self: *Table, allocator: std.mem.Allocator) void {
+        for (&self.slots) |*s| {
+            if (s.*) |*sp| sp.freeHeap(allocator);
+        }
         std.crypto.secureZero(u8, std.mem.asBytes(&self.slots));
     }
 
@@ -200,13 +282,14 @@ test "open returns nonzero handles and get resolves them" {
 }
 
 test "close frees the slot and closeAll empties the table" {
+    const a = std.testing.allocator;
     var t: Table = .{};
     const h = t.open(0, ck.CKF_SERIAL_SESSION).?;
-    try std.testing.expect(t.close(h));
-    try std.testing.expect(!t.close(h));
+    try std.testing.expect(t.close(a, h));
+    try std.testing.expect(!t.close(a, h));
     try std.testing.expect(!t.anyOpen());
     _ = t.open(0, ck.CKF_SERIAL_SESSION);
-    t.closeAll(0);
+    t.closeAll(a, 0);
     try std.testing.expect(!t.anyOpen());
 }
 
@@ -214,20 +297,43 @@ fn expectAllZero(bytes: []const u8) !void {
     for (bytes) |b| try std.testing.expectEqual(@as(u8, 0), b);
 }
 
-test "EncryptOp.zeroize zeros the AES key material" {
+test "EncryptOp.deinit zeros the AES key material" {
     var op: EncryptOp = .{ .aes = .{ .mode = .cbc, .encrypt = true, .key_len = 32 } };
     const key: []u8 = &op.aes.key_buf;
     @memset(key, 0xAA);
-    op.zeroize();
+    op.deinit(std.testing.allocator);
     try expectAllZero(key);
 }
 
-test "DecryptOp.zeroize zeros the AES key material" {
+test "DecryptOp.deinit zeros the AES key material" {
     var op: DecryptOp = .{ .aes = .{ .mode = .cbc, .encrypt = false, .key_len = 16 } };
     const key: []u8 = &op.aes.key_buf;
     @memset(key, 0xAA);
-    op.zeroize();
+    op.deinit(std.testing.allocator);
     try expectAllZero(key);
+}
+
+test "GcmStream secure-grows across a realloc and deinit clears it" {
+    const a = std.testing.allocator;
+    var g: GcmStream = .{ .cipher = .{ .mode = .gcm, .encrypt = true, .key_len = 32 } };
+    var part: [200]u8 = undefined;
+    for (&part, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    try g.append(a, &part);
+    try g.append(a, &part);
+    try std.testing.expectEqual(@as(usize, 400), g.len);
+    try std.testing.expectEqualSlices(u8, &part, g.data()[0..200]);
+    try std.testing.expectEqualSlices(u8, &part, g.data()[200..400]);
+    g.deinit(a);
+    try std.testing.expect(g.buf == null);
+    try std.testing.expectEqual(@as(usize, 0), g.len);
+}
+
+test "GcmStream enforces the DoS bound" {
+    const a = std.testing.allocator;
+    var g: GcmStream = .{ .cipher = .{ .mode = .gcm, .encrypt = true, .key_len = 16 } };
+    defer g.deinit(a);
+    g.len = config.max_gcm_stream_len;
+    try std.testing.expectError(error.TooLarge, g.append(a, "x"));
 }
 
 test "SignOp.zeroize zeros the EC private scalar" {
@@ -247,35 +353,49 @@ test "VerifyOp.zeroize zeros HMAC key state" {
 }
 
 test "endEncrypt clears the op and removes the secret from the slot" {
+    const a = std.testing.allocator;
     var t: Table = .{};
     const h = t.open(0, ck.CKF_SERIAL_SESSION).?;
     const sess = t.get(h).?;
-    sess.encrypt_op = .{ .aes = .{ .mode = .gcm, .encrypt = true, .key_len = 32 } };
+    sess.encrypt_op = .{ .aes = .{ .mode = .cbc, .encrypt = true, .key_len = 32 } };
     const key: []u8 = &sess.encrypt_op.?.aes.key_buf;
     @memset(key, 0x5C);
-    sess.endEncrypt();
+    sess.endEncrypt(a);
     try std.testing.expect(sess.encrypt_op == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, key, 0x5C) == null);
 }
 
 test "close removes an active op's secret from the slot" {
+    const a = std.testing.allocator;
     var t: Table = .{};
     const h = t.open(0, ck.CKF_SERIAL_SESSION).?;
     const sess = t.get(h).?;
     sess.decrypt_op = .{ .aes = .{ .mode = .cbc, .encrypt = false, .key_len = 32 } };
     const key: []u8 = &sess.decrypt_op.?.aes.key_buf;
     @memset(key, 0x5C);
-    try std.testing.expect(t.close(h));
+    try std.testing.expect(t.close(a, h));
     try std.testing.expect(std.mem.indexOfScalar(u8, key, 0x5C) == null);
 }
 
+test "close frees an active GCM stream's heap buffer" {
+    const a = std.testing.allocator;
+    var t: Table = .{};
+    const h = t.open(0, ck.CKF_SERIAL_SESSION).?;
+    const sess = t.get(h).?;
+    sess.encrypt_op = .{ .gcm = .{ .cipher = .{ .mode = .gcm, .encrypt = true, .key_len = 32 } } };
+    try sess.encrypt_op.?.gcm.append(a, "buffered-plaintext-awaiting-final");
+    try std.testing.expect(t.close(a, h));
+    try std.testing.expect(!t.anyOpen());
+}
+
 test "wipeAll zeros secret material in every slot" {
+    const a = std.testing.allocator;
     var t: Table = .{};
     const h = t.open(0, ck.CKF_SERIAL_SESSION).?;
     const sess = t.get(h).?;
     sess.sign_op = .{ .mac = undefined };
     const st: []u8 = std.mem.asBytes(&sess.sign_op.?.mac);
     @memset(st, 0xEF);
-    t.wipeAll();
+    t.wipeAll(a);
     try expectAllZero(st);
 }

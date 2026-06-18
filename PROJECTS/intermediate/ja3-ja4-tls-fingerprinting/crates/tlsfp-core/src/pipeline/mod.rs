@@ -399,7 +399,7 @@ impl Pipeline {
             let opened = if let Some(keys) = flow.keys.as_ref() {
                 packet.open(keys, flow.largest_pn).ok()
             } else {
-                let candidate = InitialKeys::client(packet.dcid);
+                let candidate = packet.client_keys();
                 match packet.open(&candidate, None) {
                     Ok(opened) => {
                         flow.keys = Some(candidate);

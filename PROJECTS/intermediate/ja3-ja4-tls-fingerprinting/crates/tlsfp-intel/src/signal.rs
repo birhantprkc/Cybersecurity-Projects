@@ -28,6 +28,16 @@
 
 use crate::model::Category;
 
+/// Whether `needle` appears in `haystack` as a whole word, bounded by characters
+/// that are not ASCII alphanumeric. Short, ambiguous tokens like "tor" and
+/// "java" are matched this way so a label such as "Factory" is not read as Tor
+/// and a User-Agent mentioning "javascript" is not read as Java.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word == needle)
+}
+
 /// A coarse operating-system class, the resolution the SYN signature can carry
 /// without guessing. Finer naming from one packet is not reliable, so the
 /// mismatch rule works at this granularity on purpose.
@@ -216,7 +226,7 @@ pub fn ua_family(user_agent: &str) -> Option<Family> {
     if ua.contains("okhttp") {
         return Some(Family::OkHttp);
     }
-    if ua.contains("java") {
+    if contains_word(&ua, "java") {
         return Some(Family::Java);
     }
     None
@@ -263,10 +273,10 @@ pub fn label_family(label: &str) -> Option<Family> {
     if label.contains("okhttp") {
         return Some(Family::OkHttp);
     }
-    if label.contains("java") {
+    if contains_word(&label, "java") {
         return Some(Family::Java);
     }
-    if label.contains("tor") {
+    if contains_word(&label, "tor") {
         return Some(Family::Tor);
     }
     None
@@ -413,5 +423,14 @@ mod tests {
         assert!(label_is_non_browser("TrickBot", Category::Malware));
         assert!(!label_is_non_browser("Google Chrome", Category::Benign));
         assert!(!label_is_non_browser("unrecognised", Category::Benign));
+    }
+
+    #[test]
+    fn ambiguous_substrings_do_not_misclassify() {
+        assert_eq!(label_family("Factory C2"), None);
+        assert_eq!(label_family("Tor Browser"), Some(Family::Tor));
+        assert_eq!(label_family("JavaScript Runtime"), None);
+        assert_eq!(label_family("Java"), Some(Family::Java));
+        assert_eq!(ua_family("Mozilla/5.0 javascript engine"), None);
     }
 }

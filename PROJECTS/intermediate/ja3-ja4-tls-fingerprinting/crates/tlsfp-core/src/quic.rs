@@ -49,6 +49,9 @@ use crate::registry::handshake_type;
 /// The QUIC version 1 code point, from RFC 9000.
 pub const VERSION_1: u32 = 0x0000_0001;
 
+/// The QUIC version 2 code point, from RFC 9369.
+pub const VERSION_2: u32 = 0x6b33_43cf;
+
 /// The version 1 Initial salt, from RFC 9001 Section 5.2. This constant is
 /// what binds a set of Initial keys to one QUIC version: a different version
 /// uses a different salt, so keys derived under the wrong salt simply fail
@@ -56,6 +59,15 @@ pub const VERSION_1: u32 = 0x0000_0001;
 const INITIAL_SALT_V1: [u8; 20] = [
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
     0xcc, 0xbb, 0x7f, 0x0a,
+];
+
+/// The version 2 Initial salt, from RFC 9369 Section 3.3.1. QUIC v2 deliberately
+/// changes the salt, the key derivation labels, and the long header type code
+/// for Initial away from their v1 values, so an observer must implement the
+/// version on purpose rather than assume v1 framing.
+const INITIAL_SALT_V2: [u8; 20] = [
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
+    0xf9, 0xbd, 0x2e, 0xd9,
 ];
 
 const KEY_LEN: usize = 16;
@@ -79,10 +91,11 @@ const PN_SAMPLE_OFFSET: usize = 4;
 const MAX_CID_LEN: usize = 20;
 
 /// The high bit of the first byte marks a long header; the next bit is the
-/// version independent fixed bit. Initial is long header packet type `0b00`.
+/// version independent fixed bit. The two type bits identify an Initial, but
+/// their value differs by version, `0b00` in v1 and `0b01` in v2, so the type
+/// code is carried per version rather than as one constant.
 const LONG_HEADER_FORM: u8 = 0x80;
 const PACKET_TYPE_MASK: u8 = 0x30;
-const PACKET_TYPE_INITIAL: u8 = 0x00;
 
 /// Header protection masks the low four bits of a long header's first byte.
 const LONG_HEADER_PN_MASK: u8 = 0x0f;
@@ -174,6 +187,51 @@ fn hkdf_expand_label(secret: &[u8], label: &[u8], out: &mut [u8]) {
         .expect("Initial output never exceeds the HKDF limit");
 }
 
+/// The version specific inputs to Initial key derivation: the HKDF salt, the
+/// key, IV, and header protection labels, and the long header type code that
+/// marks an Initial packet.
+///
+/// QUIC v1 (RFC 9001) and v2 (RFC 9369) differ in all of these. Binding them to
+/// the version is what makes keys derived under the wrong version fail the AEAD
+/// tag rather than silently misread a packet, and the `client in` secret label
+/// is shared because it comes from the TLS 1.3 derivation, which v2 left alone.
+#[derive(Clone, Copy)]
+struct QuicVersion {
+    salt: &'static [u8; 20],
+    key_label: &'static [u8],
+    iv_label: &'static [u8],
+    hp_label: &'static [u8],
+    initial_type: u8,
+}
+
+impl QuicVersion {
+    const V1: QuicVersion = QuicVersion {
+        salt: &INITIAL_SALT_V1,
+        key_label: b"quic key",
+        iv_label: b"quic iv",
+        hp_label: b"quic hp",
+        initial_type: 0x00,
+    };
+
+    const V2: QuicVersion = QuicVersion {
+        salt: &INITIAL_SALT_V2,
+        key_label: b"quicv2 key",
+        iv_label: b"quicv2 iv",
+        hp_label: b"quicv2 hp",
+        initial_type: 0x10,
+    };
+
+    /// Returns the parameters for a known QUIC version code, or `None` for a
+    /// version this build has no Initial salt for.
+    fn from_code(code: u32) -> Option<QuicVersion> {
+        match code {
+            VERSION_1 => Some(Self::V1),
+            VERSION_2 => Some(Self::V2),
+            _ => None,
+        }
+    }
+}
+
 /// The AEAD and header protection keys for one direction of one QUIC Initial.
 pub struct InitialKeys {
     key: [u8; KEY_LEN],
@@ -182,16 +240,16 @@ pub struct InitialKeys {
 }
 
 impl InitialKeys {
-    /// Derives the client's Initial keys from a Destination Connection ID,
-    /// for QUIC version 1.
+    /// Derives the client's Initial keys from a Destination Connection ID, under
+    /// the salt and labels of the given QUIC version.
     ///
     /// A passive observer derives these from the connection ID alone, with no
     /// secret input, which is exactly why the AEAD tag rather than secrecy is
     /// what tells a client Initial apart from a server one: only a packet the
     /// client actually protected under these keys will verify.
     #[must_use]
-    pub fn client(dcid: &[u8]) -> Self {
-        let (initial_secret, _) = Hkdf::<Sha256>::extract(Some(&INITIAL_SALT_V1), dcid);
+    fn client(dcid: &[u8], version: QuicVersion) -> Self {
+        let (initial_secret, _) = Hkdf::<Sha256>::extract(Some(version.salt), dcid);
         let mut client_secret = [0u8; 32];
         hkdf_expand_label(&initial_secret, b"client in", &mut client_secret);
 
@@ -200,9 +258,9 @@ impl InitialKeys {
             iv: [0u8; IV_LEN],
             hp: [0u8; HP_LEN],
         };
-        hkdf_expand_label(&client_secret, b"quic key", &mut keys.key);
-        hkdf_expand_label(&client_secret, b"quic iv", &mut keys.iv);
-        hkdf_expand_label(&client_secret, b"quic hp", &mut keys.hp);
+        hkdf_expand_label(&client_secret, version.key_label, &mut keys.key);
+        hkdf_expand_label(&client_secret, version.iv_label, &mut keys.iv);
+        hkdf_expand_label(&client_secret, version.hp_label, &mut keys.hp);
         keys
     }
 }
@@ -218,6 +276,9 @@ pub struct InitialPacket<'pkt> {
     datagram: &'pkt [u8],
     /// The Destination Connection ID, which seeds key derivation.
     pub dcid: &'pkt [u8],
+    /// The QUIC version this packet declared, selecting the salt and labels its
+    /// client keys derive under.
+    version: QuicVersion,
     /// Absolute offset of this packet's first byte within the datagram.
     start: usize,
     /// Absolute offset of the packet number field within the datagram.
@@ -250,16 +311,16 @@ impl<'pkt> InitialPacket<'pkt> {
             return Err(ParseError::NotQuicInitial);
         }
 
-        let version = u32::from_be_bytes(
+        let version_code = u32::from_be_bytes(
             buf.get(1..5)
                 .ok_or(ParseError::NotQuicInitial)?
                 .try_into()
                 .expect("a four byte slice is four bytes"),
         );
-        if version != VERSION_1 {
-            return Err(ParseError::UnsupportedQuicVersion(version));
-        }
-        if first & PACKET_TYPE_MASK != PACKET_TYPE_INITIAL {
+        let Some(version) = QuicVersion::from_code(version_code) else {
+            return Err(ParseError::UnsupportedQuicVersion(version_code));
+        };
+        if first & PACKET_TYPE_MASK != version.initial_type {
             return Err(ParseError::NotQuicInitial);
         }
 
@@ -291,11 +352,19 @@ impl<'pkt> InitialPacket<'pkt> {
         Ok(Self {
             datagram,
             dcid,
+            version,
             start,
             pn_offset,
             end,
             next_offset: end,
         })
+    }
+
+    /// Derives the client Initial keys for this packet, from its own Destination
+    /// Connection ID under the salt and labels of the version it declared.
+    #[must_use]
+    pub fn client_keys(&self) -> InitialKeys {
+        InitialKeys::client(self.dcid, self.version)
     }
 
     /// Removes header protection and decrypts the payload, returning the
@@ -622,8 +691,8 @@ pub enum ClientHelloState<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientHelloState, CryptoAssembler, InitialKeys, InitialPacket, decode_packet_number,
-        hkdf_expand_label, read_varint, walk_crypto_frames,
+        ClientHelloState, CryptoAssembler, InitialKeys, InitialPacket, QuicVersion,
+        decode_packet_number, hkdf_expand_label, read_varint, walk_crypto_frames,
     };
 
     /// RFC 9000 Appendix A.1 sample variable length integer decodings.
@@ -654,10 +723,21 @@ mod tests {
     #[test]
     fn client_initial_keys_match_rfc9001_appendix_a1() {
         let dcid = hex("8394c8f03e515708");
-        let keys = InitialKeys::client(&dcid);
+        let keys = InitialKeys::client(&dcid, QuicVersion::V1);
         assert_eq!(keys.key.to_vec(), hex("1f369613dd76d5467730efcbe3b1a22d"));
         assert_eq!(keys.iv.to_vec(), hex("fa044b2f42a3fd3b46fb255c"));
         assert_eq!(keys.hp.to_vec(), hex("9f50449e04a0e810283a1e9933adedd2"));
+    }
+
+    /// RFC 9369 Appendix A derives the QUIC v2 client Initial keys from the same
+    /// sample Destination Connection ID, under the v2 salt and labels.
+    #[test]
+    fn client_initial_keys_match_rfc9369_appendix_a() {
+        let dcid = hex("8394c8f03e515708");
+        let keys = InitialKeys::client(&dcid, QuicVersion::V2);
+        assert_eq!(keys.key.to_vec(), hex("8b1a0bc121284290a29e0971b5cd045d"));
+        assert_eq!(keys.iv.to_vec(), hex("91f73e2351d8fa91660e909f"));
+        assert_eq!(keys.hp.to_vec(), hex("45b95e15235d6f45a6b19cbcb0294ba9"));
     }
 
     /// RFC 9001 Appendix A.1 also pins the intermediate expand label output.
@@ -683,7 +763,7 @@ mod tests {
         let packet = InitialPacket::parse(&datagram, 0).unwrap();
         assert_eq!(packet.dcid, &hex("8394c8f03e515708")[..]);
 
-        let keys = InitialKeys::client(packet.dcid);
+        let keys = packet.client_keys();
         let opened = packet.open(&keys, None).unwrap();
         assert_eq!(opened.packet_number, 2);
 
@@ -730,6 +810,30 @@ mod tests {
     fn non_quic_bytes_are_not_an_initial() {
         let udp = b"GET / HTTP/1.1\r\n";
         assert!(InitialPacket::parse(udp, 0).is_err());
+    }
+
+    /// A QUIC v2 long header Initial is recognized by its version code and its
+    /// remapped Initial type bits, `0b01`, where the v1 Initial code `0b00` is
+    /// not an Initial in v2. This proves the version specific parse logic; the v2
+    /// key schedule is pinned by the keys KAT above, and the AEAD decryption path
+    /// is the one the RFC 9001 Appendix A.2 test already exercises unchanged.
+    #[test]
+    fn parses_a_quic_v2_initial_header() {
+        let mut packet = vec![0xd3];
+        packet.extend_from_slice(&super::VERSION_2.to_be_bytes());
+        packet.push(8);
+        packet.extend_from_slice(&hex("8394c8f03e515708"));
+        packet.push(0);
+        packet.push(0);
+        packet.push(0x10);
+        packet.extend_from_slice(&[0u8; 16]);
+
+        let parsed = InitialPacket::parse(&packet, 0).unwrap();
+        assert_eq!(parsed.dcid, &hex("8394c8f03e515708")[..]);
+
+        let mut v1_type = packet.clone();
+        v1_type[0] = 0xc3;
+        assert!(InitialPacket::parse(&v1_type, 0).is_err());
     }
 
     fn hex(s: &str) -> Vec<u8> {

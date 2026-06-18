@@ -8,6 +8,7 @@ pub mod tag {
     pub const OBJECT_IDENTIFIER: u8 = 0x06;
     pub const SEQUENCE: u8 = 0x30;
     pub const SET: u8 = 0x31;
+    pub const CONTEXT_0: u8 = 0xa0;
     pub const CONTEXT_3: u8 = 0xa3;
 }
 

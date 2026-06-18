@@ -40,7 +40,7 @@
   position: relative;
   z-index: 1;
   padding: $space-3;
-  background: rgba(8, 9, 10, 0.82);
+  background: rgb(8, 9, 10, 82%);
   border: 1px solid $line;
   border-left: 2px solid var(--accent);
   box-shadow: 0 0 20px -10px var(--accent);
@@ -61,7 +61,7 @@
   line-height: 1.1;
   letter-spacing: -0.01em;
   color: $chalk;
-  text-shadow: 0 0 11px rgba(255, 77, 18, 0.18);
+  text-shadow: 0 0 11px rgb(255, 77, 18, 18%);
 }
 
 .subject {

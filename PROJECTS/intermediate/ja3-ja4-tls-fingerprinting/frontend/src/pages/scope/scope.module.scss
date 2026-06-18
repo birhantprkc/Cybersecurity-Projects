@@ -83,22 +83,20 @@
 .grid {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
-  grid-template-rows: minmax(300px, auto) minmax(260px, auto) auto;
-  grid-template-areas:
-    'live anomaly'
-    'live dist'
-    'alerts alerts';
+  grid-template:
+    'live anomaly' minmax(300px, auto)
+    'live dist' minmax(260px, auto)
+    'alerts alerts' auto
+    / minmax(0, 1.62fr) minmax(0, 1fr);
   gap: $space-4;
 
   @include breakpoint-down('lg') {
-    grid-template-columns: 1fr;
-    grid-template-rows: none;
-    grid-template-areas:
+    grid-template:
       'live'
       'anomaly'
       'dist'
-      'alerts';
+      'alerts'
+      / 1fr;
   }
 }
 

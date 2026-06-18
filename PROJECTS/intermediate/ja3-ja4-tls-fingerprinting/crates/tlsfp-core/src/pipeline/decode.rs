@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn ja4t_walk_reproduces_the_linux_default_vector() {
+    fn ja4t_walk_reproduces_the_windows_default_vector() {
         let options = [
             0x02, 0x04, 0x05, 0xb4, 0x01, 0x03, 0x03, 0x08, 0x01, 0x01, 0x04, 0x02,
         ];

@@ -26,7 +26,7 @@
   transform: translateY(-50%);
   mix-blend-mode: screen;
   opacity: 0.92;
-  filter: drop-shadow(0 0 60px rgba(47, 123, 255, 0.28));
+  filter: drop-shadow(0 0 60px rgb(47, 123, 255, 28%));
   pointer-events: none;
   z-index: 0;
 
@@ -103,7 +103,7 @@
   letter-spacing: 0.34em;
   text-transform: uppercase;
   color: $fire;
-  text-shadow: 0 0 10px rgba(255, 77, 18, 0.28);
+  text-shadow: 0 0 10px rgb(255, 77, 18, 28%);
   margin-bottom: $space-5;
 }
 
@@ -114,7 +114,7 @@
   letter-spacing: 0.01em;
   color: $chalk;
   margin: 0 0 $space-5;
-  text-shadow: 0 0 48px rgba(47, 123, 255, 0.16);
+  text-shadow: 0 0 48px rgb(47, 123, 255, 16%);
 }
 
 // The mono tag reads as a tight stamp under the masthead, so it is kept short

@@ -31,7 +31,7 @@
   transform: translateY(-50%);
   mix-blend-mode: screen;
   opacity: 0.5;
-  filter: drop-shadow(0 0 40px rgba(47, 123, 255, 0.3));
+  filter: drop-shadow(0 0 40px rgb(47, 123, 255, 30%));
   pointer-events: none;
   z-index: 0;
 

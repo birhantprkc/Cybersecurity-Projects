@@ -62,7 +62,7 @@ mod tests {
     }
 
     #[test]
-    fn foxio_linux_default_vector() {
+    fn foxio_windows_default_vector() {
         let i = input(64240, &[2, 1, 3, 1, 1, 4], 1460, 8);
         assert_eq!(ja4t(&i), "64240_2-1-3-1-1-4_1460_8");
     }

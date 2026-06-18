@@ -11,7 +11,9 @@
 //!
 //! The rules, in the order they are evaluated:
 //!
-//! - known bad: the fingerprint matches malicious or suspicious intelligence.
+//! - known bad: the fingerprint matches malicious or suspicious intelligence,
+//!   raised the first time an address presents it so a repeating beacon from one
+//!   host is one alert rather than one per flow.
 //! - User-Agent mismatch: a request calls itself a browser while the same
 //!   client's TLS fingerprint is a script or a tool. This is the headline, the
 //!   lie that a fingerprint catches and a User-Agent string cannot tell.
@@ -256,8 +258,10 @@ pub(crate) fn run(
 
     let observation_id = insert_observation(conn, ts, &ip_text, kind, &value, &summary, &context)?;
 
-    if let Some(alert) = known_bad(conn, ts, &ip_text, &reports, kind, &value)? {
-        alerts.push(alert);
+    if !ip_fp_known {
+        if let Some(alert) = known_bad(conn, ts, &ip_text, &reports, kind, &value)? {
+            alerts.push(alert);
+        }
     }
 
     if !fp_known {

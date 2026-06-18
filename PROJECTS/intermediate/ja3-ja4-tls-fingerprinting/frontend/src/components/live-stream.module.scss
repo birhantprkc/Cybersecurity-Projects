@@ -48,8 +48,7 @@
 .scroll {
   position: absolute;
   inset: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden auto;
 }
 
 .row {
@@ -159,14 +158,14 @@
   border-left: 2px solid $fire;
   background: linear-gradient(
     90deg,
-    rgba(255, 77, 18, 0.14),
+    rgb(255, 77, 18, 14%),
     transparent 55%
   );
 
   &:hover {
     background: linear-gradient(
       90deg,
-      rgba(255, 77, 18, 0.2),
+      rgb(255, 77, 18, 20%),
       transparent 55%
     );
   }
@@ -176,7 +175,7 @@
   border-left: 2px solid var(--accent);
   background: linear-gradient(
     90deg,
-    rgba(255, 174, 58, 0.08),
+    rgb(255, 174, 58, 8%),
     transparent 60%
   );
 }
@@ -222,7 +221,7 @@
   from {
     opacity: 0;
     transform: translateY(-7px);
-    background: rgba(47, 123, 255, 0.09);
+    background: rgb(47, 123, 255, 9%);
   }
 
   to {

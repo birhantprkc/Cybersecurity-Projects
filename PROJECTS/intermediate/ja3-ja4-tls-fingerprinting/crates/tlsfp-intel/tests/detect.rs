@@ -106,6 +106,33 @@ fn known_bad_fires_on_malicious_fingerprint() {
 }
 
 #[test]
+fn known_bad_does_not_refire_for_the_same_address_and_fingerprint() {
+    let mut store = store();
+    let config = cfg();
+    let first = store
+        .detect_with(
+            &client_hello("10.0.0.1", 1_000_000_000, MALWARE_JA4),
+            &config,
+        )
+        .unwrap();
+    let second = store
+        .detect_with(
+            &client_hello("10.0.0.1", 2_000_000_000, MALWARE_JA4),
+            &config,
+        )
+        .unwrap();
+    let other = store
+        .detect_with(
+            &client_hello("10.0.0.99", 3_000_000_000, MALWARE_JA4),
+            &config,
+        )
+        .unwrap();
+    assert!(fires(&first, Rule::KnownBad));
+    assert!(!fires(&second, Rule::KnownBad));
+    assert!(fires(&other, Rule::KnownBad));
+}
+
+#[test]
 fn ua_mismatch_browser_claim_over_tool_handshake() {
     let mut store = store();
     let config = cfg();

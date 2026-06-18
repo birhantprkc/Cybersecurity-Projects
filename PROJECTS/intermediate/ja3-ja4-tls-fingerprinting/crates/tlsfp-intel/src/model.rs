@@ -12,6 +12,25 @@ use std::fmt;
 
 use serde::Serialize;
 
+/// The threat score at or above which a fingerprint is judged malicious.
+const MALICIOUS_THRESHOLD: f64 = 0.8;
+
+/// The threat score at or below which a fingerprint is judged benign; between
+/// the two thresholds it is suspicious.
+const BENIGN_THRESHOLD: f64 = 0.2;
+
+/// How much a suspicious, dual use hit counts toward the threat score, half a
+/// malicious vote.
+const SUSPICIOUS_VOTE: f64 = 0.5;
+
+/// The share of confidence the best match earns before corroboration, so a lone
+/// exact hit is already fairly trusted and agreeing hits raise it the rest of
+/// the way without ever exceeding the best match weight.
+const CONFIDENCE_FLOOR: f64 = 0.6;
+
+/// The remaining share of confidence that corroborating, aligned hits supply.
+const CONFIDENCE_CORROBORATION: f64 = 0.4;
+
 /// Which fingerprint algorithm a stored value belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,11 +303,11 @@ impl MatchReport {
             }
         }
         let total = malicious + suspicious + benign;
-        let threat_score = (malicious + 0.5 * suspicious) / total;
+        let threat_score = (malicious + SUSPICIOUS_VOTE * suspicious) / total;
 
-        let verdict = if threat_score >= 0.8 {
+        let verdict = if threat_score >= MALICIOUS_THRESHOLD {
             Verdict::Malicious
-        } else if threat_score <= 0.2 {
+        } else if threat_score <= BENIGN_THRESHOLD {
             Verdict::Benign
         } else {
             Verdict::Suspicious
@@ -299,7 +318,7 @@ impl MatchReport {
             .filter(|hit| verdict_aligns(verdict, hit.category.severity()))
             .count();
         let corroboration = 1.0 - 1.0 / (1.0 + count_to_f64(aligned));
-        let confidence = best * (0.6 + 0.4 * corroboration);
+        let confidence = best * (CONFIDENCE_FLOOR + CONFIDENCE_CORROBORATION * corroboration);
 
         Self {
             kind,

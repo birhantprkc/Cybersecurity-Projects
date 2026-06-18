@@ -32,6 +32,15 @@ pub fn ja4x(cert_der: &[u8]) -> Result<String> {
 
 type OidList = SmallVec<[String; 8]>;
 
+/// Walks a certificate down to the issuer Name, the subject Name, and the
+/// extension block, the three field groups JA4X reads.
+///
+/// The TBSCertificate fields sit in a fixed order (RFC 5280): an optional
+/// explicit version tagged context zero, then the serial number, signature
+/// algorithm, issuer, validity, subject, and public key, with the extensions
+/// tagged context three at the end. The walk names every field it steps over and
+/// bounds checks each one, so a certificate truncated before the public key or
+/// the extensions is an error rather than a panic.
 fn certificate_oids(cert_der: &[u8]) -> Result<(OidList, OidList, OidList)> {
     let mut outer = Der::new(cert_der);
     let (_, certificate) = outer.read_tlv()?;
@@ -44,19 +53,24 @@ fn certificate_oids(cert_der: &[u8]) -> Result<(OidList, OidList, OidList)> {
         fields.push(walker.read_tlv()?);
     }
 
-    let mut idx = 0;
-    if fields.first().is_some_and(|(t, _)| *t == 0xa0) {
-        idx += 1;
+    let mut cursor = 0usize;
+    if fields.first().is_some_and(|(t, _)| *t == tag::CONTEXT_0) {
+        cursor += 1;
     }
-    idx += 2;
-    let issuer = field_content(&fields, idx)?;
-    idx += 1;
-    idx += 1;
-    let subject = field_content(&fields, idx)?;
-    idx += 1;
-    idx += 1;
+    let _serial = field_content(&fields, cursor)?;
+    cursor += 1;
+    let _signature = field_content(&fields, cursor)?;
+    cursor += 1;
+    let issuer = field_content(&fields, cursor)?;
+    cursor += 1;
+    let _validity = field_content(&fields, cursor)?;
+    cursor += 1;
+    let subject = field_content(&fields, cursor)?;
+    cursor += 1;
 
-    let extensions = fields[idx..]
+    let extensions = fields
+        .get(cursor..)
+        .unwrap_or(&[])
         .iter()
         .find(|(t, _)| *t == tag::CONTEXT_3)
         .map(|(_, c)| *c);
@@ -154,6 +168,31 @@ mod tests {
 
         let oids = name_oids(&name).unwrap();
         assert_eq!(oids.as_slice(), &["550406", "55040a", "55040b", "550403"]);
+    }
+
+    #[test]
+    fn certificate_ending_after_subject_is_handled_without_panic() {
+        let rdn = tlv(
+            0x31,
+            &tlv(0x30, &{
+                let mut atv = oid(&[0x55, 0x04, 0x03]);
+                atv.extend(tlv(0x13, b"x"));
+                atv
+            }),
+        );
+        let tbs = tlv(
+            0x30,
+            &[
+                tlv(0x02, &[0x01]),
+                tlv(0x30, &[]),
+                tlv(0x30, &rdn),
+                tlv(0x30, &[]),
+                tlv(0x30, &rdn),
+            ]
+            .concat(),
+        );
+        let cert = tlv(0x30, &tbs);
+        assert!(super::ja4x(&cert).is_ok());
     }
 
     #[test]

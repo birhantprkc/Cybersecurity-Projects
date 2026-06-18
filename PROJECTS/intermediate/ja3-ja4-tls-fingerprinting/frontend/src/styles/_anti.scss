@@ -9,7 +9,7 @@
 // the instrument itself. Neutral type sits between.
 
 // The void and the panels lifted just off it.
-$void: #000000;
+$void: #000;
 $ink-1000: #050506;
 $ink-900: #0a0b0d;
 $ink-800: #0f1113;
@@ -18,7 +18,7 @@ $ink-600: #1c2024;
 $ink-500: #262b30;
 
 // Bone white for the artifacts, chalk for the few things that must shout.
-$chalk: #ffffff;
+$chalk: #fff;
 $bone: #f2f0e9;
 $paper: #d8d6cd;
 
@@ -28,10 +28,10 @@ $dust: #5a5f65;
 $soot: #34383d;
 
 // Hairlines. The grid the specimens are pinned to.
-$line-faint: rgba(255, 255, 255, 0.06);
-$line: rgba(255, 255, 255, 0.11);
-$line-strong: rgba(255, 255, 255, 0.2);
-$line-hot: rgba(255, 77, 18, 0.55);
+$line-faint: rgb(255, 255, 255, 6%);
+$line: rgb(255, 255, 255, 11%);
+$line-strong: rgb(255, 255, 255, 20%);
+$line-hot: rgb(255, 77, 18, 55%);
 
 // The hot channels: what the x-ray exposes, what bleeds through the black.
 $fire: #ff4d12; // the butterfly's fire, the snake; primary anomaly

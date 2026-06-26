@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const opts = b.addOptions();
-    opts.addOption([]const u8, "version", "0.0.0-m0");
+    opts.addOption([]const u8, "version", "0.0.0-m1");
 
     const packet_mod = b.createModule(.{
         .root_source_file = b.path("src/packet.zig"),
@@ -29,6 +29,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     smoke_mod.addImport("packet", packet_mod);
+
+    const cookie_mod = b.createModule(.{
+        .root_source_file = b.path("src/cookie.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const exe = b.addExecutable(.{
         .name = "zingela",
@@ -57,7 +63,7 @@ pub fn build(b: *std.Build) void {
     smoke_step.dependOn(&smoke_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
-    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod };
+    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod };
     for (test_mods) |mod| {
         const t = b.addTest(.{ .root_module = mod });
         const rt = b.addRunArtifact(t);

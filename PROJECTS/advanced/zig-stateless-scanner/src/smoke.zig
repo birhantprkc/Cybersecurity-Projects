@@ -42,14 +42,7 @@ fn build_syn(dst_port: u16) [54]u8 {
         .urgent = 0,
     };
 
-    var pseudo: [12 + 20]u8 = undefined;
-    @memcpy(pseudo[0..4], std.mem.asBytes(&ip.src));
-    @memcpy(pseudo[4..8], std.mem.asBytes(&ip.dst));
-    pseudo[8] = 0;
-    pseudo[9] = 6;
-    std.mem.writeInt(u16, pseudo[10..12], 20, .big);
-    @memcpy(pseudo[12..32], std.mem.asBytes(&tcp));
-    tcp.checksum = std.mem.nativeToBig(u16, packet.checksum(&pseudo));
+    tcp.checksum = std.mem.nativeToBig(u16, packet.tcpChecksum(ip.src, ip.dst, std.mem.asBytes(&tcp)));
     @memcpy(frame[34..54], std.mem.asBytes(&tcp));
 
     return frame;

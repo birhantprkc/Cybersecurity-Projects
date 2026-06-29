@@ -4,6 +4,7 @@
 const std = @import("std");
 const cli = @import("cli");
 const smoke = @import("smoke");
+const txcmd = @import("txcmd");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -18,6 +19,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "smoke")) {
         const ifname: []const u8 = if (args.len > 2) args[2] else "lo";
         return smoke.run(io, ifname);
+    }
+    if (std.mem.eql(u8, cmd, "tx")) {
+        return txcmd.run(io, arena, args);
     }
     return cli.printHelp(io);
 }

@@ -49,8 +49,23 @@ pub fn printHelp(io: std.Io) !void {
         \\
         \\commands:
         \\  smoke [ifname]   send one hand-built SYN via AF_PACKET (default ifname: lo)
+        \\  tx [options]     PACKET_TX_RING SYN blast over a target range (privileged)
         \\  --version, -V    print version
         \\  --help, -h       print this help
+        \\
+        \\tx options:
+        \\  --target <cidr>  target range, required (e.g. 10.0.0.0/24)
+        \\  --ports <list>   comma-separated dst ports (default 80)
+        \\  --rate <pps>     token-bucket rate, packets per second (default 10000)
+        \\  --count <n>      stop after n packets (default: every target once)
+        \\  --iface <name>   egress interface (default lo)
+        \\  --src-ip <addr>  source IPv4 (default: resolved from --iface)
+        \\  --src-port <n>   source TCP port (default 40000)
+        \\  --gw-mac <mac>   gateway/dst MAC aa:bb:cc:dd:ee:ff (default 00:..:00)
+        \\  --seed <n>       permutation seed (default: per-scan CSPRNG)
+        \\
+        \\authorized use only. responsible default rate; needs CAP_NET_RAW
+        \\(grant once: sudo setcap cap_net_raw,cap_net_admin=eip ./zig-out/bin/zingela)
         \\
     );
     try out.flush();

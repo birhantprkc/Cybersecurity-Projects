@@ -57,6 +57,9 @@ Tools, courses, certifications, communities, and frameworks for cybersecurity pr
 
 ---
 
+> [!TIP]
+> **Want to be walked through building these instead of reading finished source?** [CertGames](https://certgames.com) has guided project courses that build real security tools from scratch, step by step, with the concepts explained as you go. Same projects, less getting stuck. FREE
+
 ## Foundations Projects
 
 > [!NOTE]
@@ -166,6 +169,8 @@ Tools, courses, certifications, communities, and frameworks for cybersecurity pr
 **[Certification Roadmaps](./ROADMAPS/README.md)** - Career paths for SOC Analyst, Pentester, Security Engineer, GRC Analyst, and 6 more tracks
 
 **[Learning Resources](./RESOURCES/README.md)** - Tools, courses, certifications, YouTube channels, Reddit communities, and security frameworks
+
+**[CertGames](https://certgames.com)** - The platform I built to do all of this in one place: practice questions, Learn lessons, guided projects, and these roadmaps with progress tracking. FREE
 
 
 ## License

@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
         return txcmd.run(io, arena, args);
     }
     if (std.mem.eql(u8, cmd, "scan")) {
-        return scancmd.run(io, arena, args);
+        return scancmd.run(io, arena, args, init.environ_map);
     }
-    return cli.printHelp(io);
+    return cli.printHelp(io, init.environ_map);
 }

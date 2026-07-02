@@ -22,6 +22,8 @@ const default_iface = "lo";
 const default_rate: u64 = 10_000;
 const default_src_port: u16 = 40_000;
 const default_ports = [_]u16{80};
+const ns_per_sec: u64 = 1_000_000_000;
+const tx_budget_floor_ns: u64 = 60 * ns_per_sec;
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !void {
     var buf: [512]u8 = undefined;
@@ -79,7 +81,9 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !
 
     var clock = RealClock{};
     const t0 = clock.now();
-    const sent = tx.run(&eng, &tmpl, &bucket, &backend, &clock, count);
+    const est_tx_ns: u64 = if (rate > 0) (count / rate) *| ns_per_sec else tx_budget_floor_ns;
+    const deadline_ns = t0 +| (est_tx_ns *| 4) +| tx_budget_floor_ns;
+    const sent = tx.run(&eng, &tmpl, &bucket, &backend, &clock, count, deadline_ns);
     const elapsed_ns = clock.now() - t0;
 
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;

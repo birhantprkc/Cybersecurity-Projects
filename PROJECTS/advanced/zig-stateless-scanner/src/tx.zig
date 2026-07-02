@@ -15,6 +15,7 @@ pub fn run(
     sink: anytype,
     clock: anytype,
     max_packets: u64,
+    deadline_ns: u64,
 ) u64 {
     _ = bucket.takeBatch(clock.now(), 0);
     var sent: u64 = 0;
@@ -22,7 +23,9 @@ pub fn run(
 
     var pending: ?targets.Target = engine.next();
     while (pending != null and sent < max_packets) {
-        const granted = bucket.takeBatch(clock.now(), max_packets - sent);
+        const now_ns = clock.now();
+        if (now_ns >= deadline_ns) break;
+        const granted = bucket.takeBatch(now_ns, max_packets - sent);
         if (granted == 0) {
             clock.sleepNs(bucket.step_ns);
             continue;
@@ -92,7 +95,7 @@ test "the TX engine drives the M2 bijection through stamp + ratelimit + submit" 
     var sink = FakeSink{ .allocator = std.testing.allocator };
     defer sink.frames.deinit(std.testing.allocator);
 
-    const sent = run(&eng, &tmpl, &tb, &sink, &clock, 1_000_000);
+    const sent = run(&eng, &tmpl, &tb, &sink, &clock, 1_000_000, std.math.maxInt(u64));
     try std.testing.expectEqual(@as(u64, 8), sent);
     try std.testing.expectEqual(@as(usize, 8), sink.frames.items.len);
     try std.testing.expect(sink.kicks >= 1);
@@ -130,7 +133,40 @@ test "max_packets caps the send count below the target total" {
     var sink = FakeSink{ .allocator = std.testing.allocator };
     defer sink.frames.deinit(std.testing.allocator);
 
-    const sent = run(&eng, &tmpl, &tb, &sink, &clock, 5);
+    const sent = run(&eng, &tmpl, &tb, &sink, &clock, 5, std.math.maxInt(u64));
     try std.testing.expectEqual(@as(u64, 5), sent);
     try std.testing.expectEqual(@as(usize, 5), sink.frames.items.len);
+}
+
+const StuckSink = struct {
+    kicks: usize = 0,
+    fn submit(_: *StuckSink, _: []const u8) bool {
+        return false;
+    }
+    fn kick(self: *StuckSink) void {
+        self.kicks += 1;
+    }
+};
+
+test "run bails at the deadline when the sink never drains (stall watchdog)" {
+    const test_key = [_]u8{0} ** 16;
+    const cidrs = [_]targets.Range{try targets.parseCidr("8.8.8.0/28")};
+    const ports = [_]u16{80};
+    var eng = try targets.Engine.init(std.testing.allocator, &cidrs, &ports, 0x1234);
+    defer eng.deinit();
+
+    const tmpl = template.SynTemplate.init(.{
+        .src_mac = .{0} ** 6,
+        .dst_mac = .{0} ** 6,
+        .src_ip = 0x0a000001,
+        .src_port = 40000,
+        .cookie = cookie.Cookie.init(test_key),
+    });
+    var tb = ratelimit.TokenBucket.init(1000, 64);
+    var clock = FakeClock{};
+    var sink = StuckSink{};
+
+    const sent = run(&eng, &tmpl, &tb, &sink, &clock, 1_000_000, 5_000_000_000);
+    try std.testing.expectEqual(@as(u64, 0), sent);
+    try std.testing.expect(sink.kicks >= 1);
 }

@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const opts = b.addOptions();
-    opts.addOption([]const u8, "version", "0.0.0-m4");
+    opts.addOption([]const u8, "version", "0.0.0-m5");
 
     const packet_mod = b.createModule(.{
         .root_source_file = b.path("src/packet.zig"),
@@ -89,6 +89,14 @@ pub fn build(b: *std.Build) void {
     classify_mod.addImport("packet", packet_mod);
     classify_mod.addImport("cookie", cookie_mod);
 
+    const output_mod = b.createModule(.{
+        .root_source_file = b.path("src/output.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    output_mod.addImport("classify", classify_mod);
+    cli_mod.addImport("output", output_mod);
+
     const dedup_mod = b.createModule(.{
         .root_source_file = b.path("src/dedup.zig"),
         .target = target,
@@ -137,6 +145,7 @@ pub fn build(b: *std.Build) void {
     scancmd_mod.addImport("rx", rx_mod);
     scancmd_mod.addImport("dedup", dedup_mod);
     scancmd_mod.addImport("netutil", netutil_mod);
+    scancmd_mod.addImport("output", output_mod);
 
     const exe = b.addExecutable(.{
         .name = "zingela",
@@ -167,7 +176,7 @@ pub fn build(b: *std.Build) void {
     smoke_step.dependOn(&smoke_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
-    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, afpacket_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, scancmd_mod };
+    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, afpacket_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, output_mod, scancmd_mod };
     for (test_mods) |mod| {
         const t = b.addTest(.{ .root_module = mod });
         const rt = b.addRunArtifact(t);

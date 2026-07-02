@@ -22,6 +22,7 @@ const reserved = [_]Range{
     .{ .start = 0xac100000, .end = 0xac1fffff },
     .{ .start = 0xc0000000, .end = 0xc00000ff },
     .{ .start = 0xc0000200, .end = 0xc00002ff },
+    .{ .start = 0xc0586300, .end = 0xc05863ff },
     .{ .start = 0xc0a80000, .end = 0xc0a8ffff },
     .{ .start = 0xc6120000, .end = 0xc613ffff },
     .{ .start = 0xc6336400, .end = 0xc63364ff },
@@ -243,6 +244,7 @@ test "isReserved flags RFC 6890 space, passes public IPs" {
     try std.testing.expect(isReserved((try parseCidr("169.254.5.5/32")).start));
     try std.testing.expect(isReserved((try parseCidr("224.0.0.1/32")).start));
     try std.testing.expect(isReserved((try parseCidr("0.0.0.0/32")).start));
+    try std.testing.expect(isReserved((try parseCidr("192.88.99.1/32")).start));
     try std.testing.expect(!isReserved((try parseCidr("8.8.8.8/32")).start));
     try std.testing.expect(!isReserved((try parseCidr("1.1.1.1/32")).start));
 }
@@ -318,9 +320,9 @@ test "shards with a shared seed union to the full bijection with no overlap" {
 }
 
 test "initShard rejects nonsensical shard counts" {
-    const cidrs = [_]Range{try parseCidr("8.8.8.0/30")}; // 4 ips
-    const ports = [_]u16{80};                             // total = 4, order = smallestPrimeAbove(4)-1 = 4
-    try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 0, 0));        // num_shards 0
-    try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 100, 0));      // more shards than order
-    try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 2, 5));        // shard_id out of range
+    const cidrs = [_]Range{try parseCidr("8.8.8.0/30")};
+    const ports = [_]u16{80};
+    try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 0, 0));
+    try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 100, 0));
+    try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 2, 5));
 }

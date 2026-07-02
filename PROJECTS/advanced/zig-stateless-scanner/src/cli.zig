@@ -3,8 +3,7 @@
 
 const std = @import("std");
 const build_config = @import("build_config");
-
-const reset = "\x1b[0m";
+const output = @import("output");
 
 const banner_art =
     \\  ____  _                 _
@@ -14,19 +13,12 @@ const banner_art =
     \\               |___/
 ;
 
-pub fn colorEnabled(io: std.Io) bool {
-    return std.Io.File.stdout().isTty(io) catch false;
-}
-
-pub fn printBanner(io: std.Io) !void {
-    var buf: [512]u8 = undefined;
+pub fn printBanner(io: std.Io, env: *std.process.Environ.Map) !void {
+    var buf: [1024]u8 = undefined;
     var fw = std.Io.File.stdout().writer(io, &buf);
     const out = &fw.interface;
-    if (colorEnabled(io)) {
-        try out.print("\x1b[38;2;000;200;255m{s}{s}\n", .{ banner_art, reset });
-    } else {
-        try out.print("{s}\n", .{banner_art});
-    }
+    const level = output.envLevel(io, std.Io.File.stdout(), env, .auto);
+    try output.bannerWordmark(out, level, banner_art);
     try out.print("  zingela {s}  stateless mass scanner (Zig 0.16)\n\n", .{build_config.version});
     try out.flush();
 }
@@ -39,8 +31,8 @@ pub fn printVersion(io: std.Io) !void {
     try out.flush();
 }
 
-pub fn printHelp(io: std.Io) !void {
-    try printBanner(io);
+pub fn printHelp(io: std.Io, env: *std.process.Environ.Map) !void {
+    try printBanner(io, env);
     var buf: [512]u8 = undefined;
     var fw = std.Io.File.stdout().writer(io, &buf);
     const out = &fw.interface;
@@ -67,6 +59,8 @@ pub fn printHelp(io: std.Io) !void {
         \\
         \\scan-only options:
         \\  --wait <ms>      receive drain window after transmit (default 2000)
+        \\  --json           emit NDJSON results to stdout (visuals go to stderr)
+        \\  --color <when>   auto | always | never (default auto)
         \\
         \\authorized use only. responsible default rate; needs CAP_NET_RAW
         \\(grant once: sudo setcap cap_net_raw,cap_net_admin=eip ./zig-out/bin/zingela)

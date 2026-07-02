@@ -12,6 +12,13 @@ pub fn getFlag(args: []const []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
+pub fn hasFlag(args: []const []const u8, name: []const u8) bool {
+    for (args) |a| {
+        if (std.mem.eql(u8, a, name)) return true;
+    }
+    return false;
+}
+
 pub fn parseIpv4(text: []const u8) !u32 {
     var addr: u32 = 0;
     var octets: usize = 0;
@@ -115,4 +122,11 @@ test "getFlag finds values and tolerates missing" {
     try std.testing.expectEqualStrings("eth0", getFlag(&args, "--iface").?);
     try std.testing.expectEqualStrings("5000", getFlag(&args, "--rate").?);
     try std.testing.expect(getFlag(&args, "--target") == null);
+}
+
+test "hasFlag detects a valueless boolean flag in any position" {
+    const args = [_][]const u8{ "scan", "--target", "10.0.0.0/24", "--json" };
+    try std.testing.expect(hasFlag(&args, "--json"));
+    try std.testing.expect(hasFlag(&args, "scan"));
+    try std.testing.expect(!hasFlag(&args, "--nope"));
 }

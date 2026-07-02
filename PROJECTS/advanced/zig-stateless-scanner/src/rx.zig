@@ -45,10 +45,37 @@ pub const OpenError = error{
     BindFailed,
 };
 
+const POLL_TICK_MS: i32 = 100;
+
+pub const RecvPlan = union(enum) { stop, poll: i32 };
+
+pub fn planDrain(
+    now_ns: u64,
+    hard_deadline_ns: u64,
+    tx_done: bool,
+    drain_anchor_ns: *?u64,
+    drain_window_ns: u64,
+    tick_ms: i32,
+) RecvPlan {
+    if (now_ns >= hard_deadline_ns) return .stop;
+    if (!tx_done) return .{ .poll = tick_ms };
+    if (drain_anchor_ns.* == null) drain_anchor_ns.* = now_ns;
+    const deadline = drain_anchor_ns.*.? + drain_window_ns;
+    if (now_ns >= deadline) return .stop;
+    const remaining_ms: u64 = (deadline - now_ns) / NS_PER_MS;
+    const cap: u64 = @intCast(tick_ms);
+    const chosen: u64 = @min(remaining_ms + 1, cap);
+    return .{ .poll = @intCast(chosen) };
+}
+
 pub const Receiver = struct {
     fd: i32,
-    quiet_ms: i32,
-    deadline_ns: u64,
+    tx_done: *std.atomic.Value(bool),
+    drain_window_ns: u64,
+    hard_cap_ns: u64,
+    started: bool = false,
+    hard_deadline_ns: u64 = 0,
+    drain_anchor_ns: ?u64 = null,
 
     fn monoNow() u64 {
         var ts: linux.timespec = undefined;
@@ -56,7 +83,7 @@ pub const Receiver = struct {
         return @as(u64, @intCast(ts.sec)) * NS_PER_SEC + @as(u64, @intCast(ts.nsec));
     }
 
-    pub fn open(ifname: []const u8, quiet_ms: i32, total_budget_ns: u64) OpenError!Receiver {
+    pub fn open(ifname: []const u8, tx_done: *std.atomic.Value(bool), drain_window_ns: u64, hard_cap_ns: u64) OpenError!Receiver {
         const rc_sock = linux.socket(
             linux.AF.PACKET,
             linux.SOCK.RAW,
@@ -87,16 +114,21 @@ pub const Receiver = struct {
         if (linux.errno(linux.bind(fd, @ptrCast(&sll), @sizeOf(linux.sockaddr.ll))) != .SUCCESS)
             return error.BindFailed;
 
-        return .{ .fd = fd, .quiet_ms = quiet_ms, .deadline_ns = monoNow() + total_budget_ns };
+        return .{ .fd = fd, .tx_done = tx_done, .drain_window_ns = drain_window_ns, .hard_cap_ns = hard_cap_ns };
     }
 
     pub fn recv(self: *Receiver, buf: []u8) ?usize {
-        const quiet: u64 = if (self.quiet_ms > 0) @intCast(self.quiet_ms) else 0;
         while (true) {
             const now = monoNow();
-            if (now >= self.deadline_ns) return null;
-            const remaining_ms = (self.deadline_ns - now) / NS_PER_MS;
-            const timeout: i32 = if (remaining_ms >= quiet) @intCast(quiet) else @intCast(remaining_ms);
+            if (!self.started) {
+                self.started = true;
+                self.hard_deadline_ns = now +| self.hard_cap_ns;
+            }
+            const done = self.tx_done.load(.acquire);
+            const timeout: i32 = switch (planDrain(now, self.hard_deadline_ns, done, &self.drain_anchor_ns, self.drain_window_ns, POLL_TICK_MS)) {
+                .stop => return null,
+                .poll => |t| t,
+            };
             var pfd = [_]linux.pollfd{.{ .fd = self.fd, .events = linux.POLL.IN, .revents = 0 }};
             const pr = linux.poll(&pfd, 1, timeout);
             switch (linux.errno(pr)) {
@@ -104,7 +136,7 @@ pub const Receiver = struct {
                 .INTR => continue,
                 else => return null,
             }
-            if (pr == 0) return null;
+            if (pr == 0) continue;
             const rc = linux.recvfrom(self.fd, buf.ptr, buf.len, 0, null, null);
             switch (linux.errno(rc)) {
                 .SUCCESS => return @intCast(rc),
@@ -231,4 +263,39 @@ test "Io.Queue hands the deduped set from a producer to a consumer fiber" {
     consumer.await(io);
 
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
+}
+
+const ms: u64 = 1_000_000;
+
+test "planDrain keeps polling while TX is still in flight (no quiet-gap early exit)" {
+    var anchor: ?u64 = null;
+    const p = planDrain(5 * ms, 100_000 * ms, false, &anchor, 2_000 * ms, POLL_TICK_MS);
+    switch (p) {
+        .poll => |t| try std.testing.expectEqual(POLL_TICK_MS, t),
+        .stop => return error.ShouldNotStopDuringTx,
+    }
+    try std.testing.expect(anchor == null);
+}
+
+test "planDrain anchors the drain window at TX completion, not socket-open" {
+    var anchor: ?u64 = null;
+    const now: u64 = 30_000 * ms;
+    const p = planDrain(now, 100_000 * ms, true, &anchor, 2_000 * ms, POLL_TICK_MS);
+    try std.testing.expectEqual(@as(?u64, now), anchor);
+    switch (p) {
+        .poll => |t| try std.testing.expect(t >= 1 and t <= POLL_TICK_MS),
+        .stop => return error.ShouldStillDrain,
+    }
+}
+
+test "planDrain stops once the post-TX drain window elapses" {
+    var anchor: ?u64 = 30_000 * ms;
+    const p = planDrain(32_001 * ms, 100_000 * ms, true, &anchor, 2_000 * ms, POLL_TICK_MS);
+    try std.testing.expect(std.meta.activeTag(p) == .stop);
+}
+
+test "planDrain honors the hard safety cap even if TX never signalled done" {
+    var anchor: ?u64 = null;
+    const p = planDrain(9_999, 9_999, false, &anchor, 1, POLL_TICK_MS);
+    try std.testing.expect(std.meta.activeTag(p) == .stop);
 }

@@ -6,7 +6,7 @@ const targets = @import("targets");
 const template = @import("template");
 const udp = @import("udp");
 const ratelimit = @import("ratelimit");
-const afpacket = @import("afpacket");
+const packet_io = @import("packet_io");
 const cookie = @import("cookie");
 const tx = @import("tx");
 const rx = @import("rx");
@@ -40,7 +40,7 @@ const concurrency_hint =
     "scan: this system cannot launch concurrent TX/RX (needs >= 2 worker threads).\n";
 
 const TxSink = struct {
-    backend: *afpacket.Backend,
+    backend: *packet_io.Backend,
     sent: *output.Counter,
 
     pub fn submit(self: *TxSink, frame: []const u8) bool {
@@ -151,6 +151,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, e
     const wait_ms = if (netutil.getFlag(args, "--wait")) |w| try std.fmt.parseInt(i32, w, 10) else default_wait_ms;
     const json = netutil.hasFlag(args, "--json");
     const is_udp = netutil.hasFlag(args, "--udp");
+    const backend_choice = packet_io.parseChoice(netutil.getFlag(args, "--backend")) orelse {
+        try derr.writeAll("scan: --backend must be one of auto, xdp, afpacket\n");
+        try derr.flush();
+        return;
+    };
     const udp_base: u16 = src_port;
     const udp_span: u16 = @intCast(@min(@as(u32, default_udp_src_span), 65536 - @as(u32, udp_base)));
     const proto_json: []const u8 = if (is_udp) "udp" else "tcp";
@@ -206,15 +211,21 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, e
     });
     var bucket = ratelimit.TokenBucket.init(rate, rate);
 
-    var backend = afpacket.Backend.open(ifname, .{}) catch |err| switch (err) {
+    var backend = packet_io.select(allocator, ifname, backend_choice, .{}, .{}, derr) catch |err| switch (err) {
         error.NeedCapNetRaw => {
             try derr.writeAll(need_cap_hint);
+            try derr.flush();
+            return;
+        },
+        error.XdpNotCompiledIn => {
+            try derr.writeAll("scan: --backend xdp needs a build with -Dxdp\n");
             try derr.flush();
             return;
         },
         else => return err,
     };
     defer backend.close();
+    try derr.print("  using {s}\n", .{packet_io.kindLabel(backend.kind())});
 
     var tx_done = std.atomic.Value(bool).init(false);
     var rx_done = std.atomic.Value(bool).init(false);

@@ -7,8 +7,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const xdp_enabled = b.option(bool, "xdp", "Enable the AF_XDP TX backend (pure-syscall, no libxdp; needs CAP_NET_ADMIN at runtime)") orelse false;
+
     const opts = b.addOptions();
-    opts.addOption([]const u8, "version", "0.0.0-m6");
+    opts.addOption([]const u8, "version", "0.0.0-m7");
+    opts.addOption(bool, "xdp", xdp_enabled);
+    const build_config_mod = opts.createModule();
 
     const packet_mod = b.createModule(.{
         .root_source_file = b.path("src/packet.zig"),
@@ -21,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    cli_mod.addOptions("build_config", opts);
+    cli_mod.addImport("build_config", build_config_mod);
 
     const smoke_mod = b.createModule(.{
         .root_source_file = b.path("src/smoke.zig"),
@@ -85,6 +89,28 @@ pub fn build(b: *std.Build) void {
     });
     afpacket_mod.addImport("packet", packet_mod);
 
+    const xdp_mod = b.createModule(.{
+        .root_source_file = b.path("src/xdp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const afxdp_mod = b.createModule(.{
+        .root_source_file = b.path("src/afxdp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    afxdp_mod.addImport("xdp", xdp_mod);
+
+    const packet_io_mod = b.createModule(.{
+        .root_source_file = b.path("src/packet_io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    packet_io_mod.addImport("afpacket", afpacket_mod);
+    packet_io_mod.addImport("afxdp", afxdp_mod);
+    packet_io_mod.addImport("build_config", build_config_mod);
+
     const tx_mod = b.createModule(.{
         .root_source_file = b.path("src/tx.zig"),
         .target = target,
@@ -141,7 +167,7 @@ pub fn build(b: *std.Build) void {
     txcmd_mod.addImport("targets", targets_mod);
     txcmd_mod.addImport("template", template_mod);
     txcmd_mod.addImport("ratelimit", ratelimit_mod);
-    txcmd_mod.addImport("afpacket", afpacket_mod);
+    txcmd_mod.addImport("packet_io", packet_io_mod);
     txcmd_mod.addImport("cookie", cookie_mod);
     txcmd_mod.addImport("tx", tx_mod);
     txcmd_mod.addImport("netutil", netutil_mod);
@@ -155,7 +181,7 @@ pub fn build(b: *std.Build) void {
     scancmd_mod.addImport("template", template_mod);
     scancmd_mod.addImport("udp", udp_mod);
     scancmd_mod.addImport("ratelimit", ratelimit_mod);
-    scancmd_mod.addImport("afpacket", afpacket_mod);
+    scancmd_mod.addImport("packet_io", packet_io_mod);
     scancmd_mod.addImport("cookie", cookie_mod);
     scancmd_mod.addImport("tx", tx_mod);
     scancmd_mod.addImport("rx", rx_mod);
@@ -192,7 +218,7 @@ pub fn build(b: *std.Build) void {
     smoke_step.dependOn(&smoke_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
-    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, payloads_mod, udp_mod, afpacket_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, output_mod, scancmd_mod };
+    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, payloads_mod, udp_mod, afpacket_mod, xdp_mod, afxdp_mod, packet_io_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, output_mod, scancmd_mod };
     for (test_mods) |mod| {
         const t = b.addTest(.{ .root_module = mod });
         const rt = b.addRunArtifact(t);

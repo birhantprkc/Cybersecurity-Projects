@@ -56,6 +56,7 @@ pub fn printHelp(io: std.Io, env: *std.process.Environ.Map) !void {
         \\  --src-port <n>   source port; UDP uses it as the cookie-range base (default 40000)
         \\  --gw-mac <mac>   gateway/dst MAC aa:bb:cc:dd:ee:ff (default 00:..:00)
         \\  --seed <n>       permutation seed (default: per-scan CSPRNG)
+        \\  --backend <b>    TX path: auto | xdp | afpacket (default auto; xdp needs a -Dxdp build)
         \\
         \\scan-only options:
         \\  --udp            UDP scan: per-protocol payloads, ICMP type3/code3 = closed,

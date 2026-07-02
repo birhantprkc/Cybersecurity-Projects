@@ -5,7 +5,7 @@ const std = @import("std");
 const targets = @import("targets");
 const template = @import("template");
 const ratelimit = @import("ratelimit");
-const afpacket = @import("afpacket");
+const packet_io = @import("packet_io");
 const cookie = @import("cookie");
 const tx = @import("tx");
 const netutil = @import("netutil");
@@ -69,15 +69,26 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8) !
     });
     var bucket = ratelimit.TokenBucket.init(rate, rate);
 
-    var backend = afpacket.Backend.open(ifname, .{}) catch |err| switch (err) {
+    const backend_choice = packet_io.parseChoice(getFlag(args, "--backend")) orelse {
+        try out.writeAll("tx: --backend must be one of auto, xdp, afpacket\n");
+        try out.flush();
+        return;
+    };
+    var backend = packet_io.select(allocator, ifname, backend_choice, .{}, .{}, out) catch |err| switch (err) {
         error.NeedCapNetRaw => {
             try out.writeAll("tx: need CAP_NET_RAW + CAP_NET_ADMIN. Grant once, then re-run (no sudo):\n  sudo setcap cap_net_raw,cap_net_admin=eip ./zig-out/bin/zingela\nSkipping.\n");
+            try out.flush();
+            return;
+        },
+        error.XdpNotCompiledIn => {
+            try out.writeAll("tx: --backend xdp needs a build with -Dxdp\n");
             try out.flush();
             return;
         },
         else => return err,
     };
     defer backend.close();
+    try out.print("tx: using {s}\n", .{packet_io.kindLabel(backend.kind())});
 
     var clock = RealClock{};
     const t0 = clock.now();

@@ -29,7 +29,7 @@
   </a>
 </div>
 
-<p align="center"><sub><em>Currently building: Self-Hosted Shodan Clone</em></sub></p>
+<p align="center"><sub><em>Currently building: DDoS Mitigation Tool</em></sub></p>
 
 ---
 

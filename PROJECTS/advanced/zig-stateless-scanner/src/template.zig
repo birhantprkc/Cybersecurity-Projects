@@ -183,10 +183,171 @@ pub const SynTemplate = struct {
     }
 };
 
+const ethertype_ipv6: u16 = 0x86dd;
+const ip6_version_tc_flow: u32 = 0x60000000;
+const ip6_next_tcp: u8 = 6;
+const default_hop_limit: u8 = 64;
+
+const ip6_len: usize = 40;
+const l4_off6: usize = eth_len + ip6_len;
+const opts_off6: usize = l4_off6 + tcp_len;
+
+const ip6_payload_len_off: usize = eth_len + 4;
+const ip6_dst_off: usize = eth_len + 24;
+const tcp6_src_off: usize = l4_off6;
+const tcp6_dst_off: usize = l4_off6 + 2;
+const tcp6_seq_off: usize = l4_off6 + 4;
+const tcp6_ack_off: usize = l4_off6 + 8;
+const tcp6_checksum_off: usize = l4_off6 + 16;
+
+pub const SynTemplate6 = struct {
+    pub const max_frame_len: usize = opts_off6 + packet.max_syn_options_len;
+
+    base: [max_frame_len]u8,
+    frame_len: usize,
+    src_ip: [16]u8,
+    src_port: u16,
+    cookie: cookie.Cookie,
+    scan: packet.ScanType,
+
+    pub const Config = struct {
+        src_mac: [6]u8,
+        dst_mac: [6]u8,
+        src_ip: [16]u8,
+        src_port: u16,
+        cookie: cookie.Cookie,
+        profile: packet.OsProfile = .none,
+        scan: packet.ScanType = .syn,
+    };
+
+    pub fn init(cfg: Config) SynTemplate6 {
+        const opts = cfg.profile.options();
+        const tcp_total = tcp_len + opts.len;
+        const data_off_words: u8 = @intCast(tcp_total / 4);
+
+        var base: [max_frame_len]u8 = [_]u8{0} ** max_frame_len;
+
+        const eth = packet.EthHdr{
+            .dst = cfg.dst_mac,
+            .src = cfg.src_mac,
+            .ethertype = std.mem.nativeToBig(u16, ethertype_ipv6),
+        };
+        @memcpy(base[0..eth_len], std.mem.asBytes(&eth));
+
+        const ip6 = packet.Ipv6Hdr{
+            .version_tc_flow = std.mem.nativeToBig(u32, ip6_version_tc_flow),
+            .payload_len = std.mem.nativeToBig(u16, @intCast(tcp_total)),
+            .next_header = ip6_next_tcp,
+            .hop_limit = default_hop_limit,
+            .src = cfg.src_ip,
+            .dst = [_]u8{0} ** 16,
+        };
+        @memcpy(base[eth_len..l4_off6], std.mem.asBytes(&ip6));
+
+        const tcp = packet.TcpHdr{
+            .src_port = std.mem.nativeToBig(u16, cfg.src_port),
+            .dst_port = 0,
+            .seq = 0,
+            .ack = 0,
+            .data_off_ns = data_off_words << 4,
+            .flags = cfg.scan.probeFlags(),
+            .window = std.mem.nativeToBig(u16, cfg.profile.window()),
+            .checksum = 0,
+            .urgent = 0,
+        };
+        @memcpy(base[l4_off6..opts_off6], std.mem.asBytes(&tcp));
+        if (opts.len > 0) @memcpy(base[opts_off6 .. opts_off6 + opts.len], opts);
+
+        return .{
+            .base = base,
+            .frame_len = opts_off6 + opts.len,
+            .src_ip = cfg.src_ip,
+            .src_port = cfg.src_port,
+            .cookie = cfg.cookie,
+            .scan = cfg.scan,
+        };
+    }
+
+    pub fn stamp(self: *const SynTemplate6, out: *[max_frame_len]u8, dst_ip: [16]u8, dst_port: u16) usize {
+        const n = self.frame_len;
+        @memcpy(out[0..n], self.base[0..n]);
+
+        @memcpy(out[ip6_dst_off .. ip6_dst_off + 16], &dst_ip);
+        std.mem.writeInt(u16, out[tcp6_dst_off..][0..2], dst_port, .big);
+
+        const ck = self.cookie.seq6(dst_ip, dst_port, self.src_ip, self.src_port);
+        if (self.scan.cookieInAck()) {
+            std.mem.writeInt(u32, out[tcp6_seq_off..][0..4], 0, .big);
+            std.mem.writeInt(u32, out[tcp6_ack_off..][0..4], ck, .big);
+        } else {
+            std.mem.writeInt(u32, out[tcp6_seq_off..][0..4], ck, .big);
+            std.mem.writeInt(u32, out[tcp6_ack_off..][0..4], 0, .big);
+        }
+
+        std.mem.writeInt(u16, out[tcp6_checksum_off..][0..2], 0, .big);
+        const tcp_ck = packet.tcpChecksum6(self.src_ip, dst_ip, out[l4_off6..n]);
+        std.mem.writeInt(u16, out[tcp6_checksum_off..][0..2], tcp_ck, .big);
+        return n;
+    }
+};
+
 const test_key = [16]u8{
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 };
+
+const v6_src = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+const v6_dst = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99 };
+
+fn testTemplate6(profile: packet.OsProfile) SynTemplate6 {
+    return SynTemplate6.init(.{
+        .src_mac = .{ 0x02, 0, 0, 0, 0, 1 },
+        .dst_mac = .{ 0x02, 0, 0, 0, 0, 2 },
+        .src_ip = v6_src,
+        .src_port = 40000,
+        .cookie = cookie.Cookie.init(test_key),
+        .profile = profile,
+    });
+}
+
+test "the bare IPv6 SYN template stamps an 74-byte frame with a self-verifying TCP checksum" {
+    const tmpl = testTemplate6(.none);
+    var frame: [SynTemplate6.max_frame_len]u8 = undefined;
+    const len = tmpl.stamp(&frame, v6_dst, 443);
+
+    try std.testing.expectEqual(@as(usize, 14 + 40 + 20), len);
+    try std.testing.expectEqual(@as(u16, ethertype_ipv6), std.mem.readInt(u16, frame[12..14], .big));
+    try std.testing.expectEqual(@as(u8, 0x60), frame[14] & 0xf0);
+    try std.testing.expectEqual(ip6_next_tcp, frame[14 + 6]);
+    try std.testing.expectEqual(@as(u16, 20), std.mem.readInt(u16, frame[ip6_payload_len_off..][0..2], .big));
+    try std.testing.expectEqualSlices(u8, &v6_dst, frame[ip6_dst_off .. ip6_dst_off + 16]);
+    try std.testing.expectEqual(@as(u16, 0), packet.tcpChecksum6(v6_src, v6_dst, frame[l4_off6..len]));
+}
+
+test "the IPv6 SYN carries the SipHash6 seq and the Linux option chain self-verifies" {
+    const tmpl = testTemplate6(.linux);
+    var frame: [SynTemplate6.max_frame_len]u8 = undefined;
+    const len = tmpl.stamp(&frame, v6_dst, 22);
+
+    try std.testing.expectEqual(@as(usize, 14 + 40 + 20 + 20), len);
+    const ck = cookie.Cookie.init(test_key);
+    const want_seq = ck.seq6(v6_dst, 22, v6_src, 40000);
+    try std.testing.expectEqual(want_seq, std.mem.readInt(u32, frame[tcp6_seq_off..][0..4], .big));
+    try std.testing.expectEqual(@as(u16, 40), std.mem.readInt(u16, frame[ip6_payload_len_off..][0..2], .big));
+    try std.testing.expectEqualSlices(u8, packet.OsProfile.linux.options(), frame[opts_off6..len]);
+    try std.testing.expectEqual(@as(u16, 0), packet.tcpChecksum6(v6_src, v6_dst, frame[l4_off6..len]));
+}
+
+test "two IPv6 targets produce two different seqs" {
+    const tmpl = testTemplate6(.none);
+    var a: [SynTemplate6.max_frame_len]u8 = undefined;
+    var b: [SynTemplate6.max_frame_len]u8 = undefined;
+    var dst2 = v6_dst;
+    dst2[15] = 0x98;
+    _ = tmpl.stamp(&a, v6_dst, 443);
+    _ = tmpl.stamp(&b, dst2, 443);
+    try std.testing.expect(!std.mem.eql(u8, a[tcp6_seq_off..][0..4], b[tcp6_seq_off..][0..4]));
+}
 
 fn testTemplate(profile: packet.OsProfile, scan: packet.ScanType) SynTemplate {
     return SynTemplate.init(.{

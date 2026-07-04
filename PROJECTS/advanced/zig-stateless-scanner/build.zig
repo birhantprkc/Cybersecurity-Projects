@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     const xdp_enabled = b.option(bool, "xdp", "Enable the AF_XDP TX backend (pure-syscall, no libxdp; needs CAP_NET_ADMIN at runtime)") orelse false;
 
     const opts = b.addOptions();
-    opts.addOption([]const u8, "version", "0.0.0-m9");
+    opts.addOption([]const u8, "version", "0.0.0-m10");
     opts.addOption(bool, "xdp", xdp_enabled);
     const build_config_mod = opts.createModule();
 
@@ -166,7 +166,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     output_mod.addImport("classify", classify_mod);
+    output_mod.addImport("packet", packet_mod);
     cli_mod.addImport("output", output_mod);
+
+    const connect_mod = b.createModule(.{
+        .root_source_file = b.path("src/connect.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    connect_mod.addImport("classify", classify_mod);
+    connect_mod.addImport("packet", packet_mod);
+    connect_mod.addImport("targets", targets_mod);
+    connect_mod.addImport("ratelimit", ratelimit_mod);
+    connect_mod.addImport("output", output_mod);
 
     const dedup_mod = b.createModule(.{
         .root_source_file = b.path("src/dedup.zig"),
@@ -188,6 +200,22 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    const rawprobe_mod = b.createModule(.{
+        .root_source_file = b.path("src/rawprobe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    targets_mod.addImport("netutil", netutil_mod);
+    tx_mod.addImport("netutil", netutil_mod);
+
+    const ndp_mod = b.createModule(.{
+        .root_source_file = b.path("src/ndp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ndp_mod.addImport("packet", packet_mod);
 
     const stealth_mod = b.createModule(.{
         .root_source_file = b.path("src/stealth.zig"),
@@ -229,6 +257,9 @@ pub fn build(b: *std.Build) void {
     scancmd_mod.addImport("output", output_mod);
     scancmd_mod.addImport("stealth", stealth_mod);
     scancmd_mod.addImport("service", service_mod);
+    scancmd_mod.addImport("connect", connect_mod);
+    scancmd_mod.addImport("rawprobe", rawprobe_mod);
+    scancmd_mod.addImport("ndp", ndp_mod);
 
     const exe = b.addExecutable(.{
         .name = "zingela",
@@ -259,7 +290,7 @@ pub fn build(b: *std.Build) void {
     smoke_step.dependOn(&smoke_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
-    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, segment_mod, regex_mod, probe_mod, service_mod, payloads_mod, udp_mod, afpacket_mod, xdp_mod, afxdp_mod, packet_io_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, stealth_mod, output_mod, scancmd_mod };
+    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, segment_mod, regex_mod, probe_mod, service_mod, payloads_mod, udp_mod, afpacket_mod, xdp_mod, afxdp_mod, packet_io_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, rawprobe_mod, ndp_mod, stealth_mod, output_mod, connect_mod, scancmd_mod };
     for (test_mods) |mod| {
         const t = b.addTest(.{ .root_module = mod });
         const rt = b.addRunArtifact(t);

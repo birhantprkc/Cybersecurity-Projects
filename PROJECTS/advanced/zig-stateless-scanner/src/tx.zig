@@ -103,6 +103,44 @@ fn runJittered(
     return sent;
 }
 
+pub fn runV6(
+    engine: *targets.Engine6,
+    tmpl: anytype,
+    bucket: *ratelimit.TokenBucket,
+    sink: anytype,
+    clock: anytype,
+    max_packets: u64,
+    deadline_ns: u64,
+) u64 {
+    bucket.prime(clock.now());
+    var sent: u64 = 0;
+    var frame: [@TypeOf(tmpl.*).max_frame_len]u8 = undefined;
+
+    var pending: ?targets.Target6 = engine.next();
+    while (pending != null and sent < max_packets) {
+        const now_ns = clock.now();
+        if (now_ns >= deadline_ns) break;
+        const granted = bucket.takeBatch(now_ns, max_packets - sent);
+        if (granted == 0) {
+            clock.sleepNs(bucket.step_ns);
+            continue;
+        }
+        var used: u64 = 0;
+        while (used < granted and sent < max_packets) {
+            const t = pending orelse break;
+            const len = tmpl.stamp(&frame, t.addr, t.port);
+            if (!submitFrame(sink, frame[0..len])) break;
+            used += 1;
+            sent += 1;
+            pending = engine.next();
+        }
+        if (used < granted) bucket.refund(granted - used);
+        sink.kick();
+    }
+    sink.kick();
+    return sent;
+}
+
 const FakeClock = struct {
     t: u64 = 0,
     fn now(self: *FakeClock) u64 {
@@ -345,6 +383,58 @@ const BoundedSink = struct {
         self.held = 0;
     }
 };
+
+const V6Sink = struct {
+    frames: std.ArrayList([74]u8) = .empty,
+    allocator: std.mem.Allocator,
+    fn submit(self: *V6Sink, frame: []const u8) bool {
+        self.frames.append(self.allocator, frame[0..74].*) catch return false;
+        return true;
+    }
+    fn kick(_: *V6Sink) void {}
+};
+
+test "the IPv6 TX engine drives Engine6 through stamp6 with self-verifying checksums and a bijection" {
+    const test_key = [_]u8{0} ** 16;
+    const cidr = try targets.parseCidr6("2001:470:1:2::/122");
+    const ports = [_]u16{ 80, 443 };
+    var eng = try targets.Engine6.init(std.testing.allocator, cidr, &ports, 0xBEEF, targets.default_max_hosts6);
+    defer eng.deinit();
+    const total = eng.total;
+
+    const src_ip = try @import("netutil").parseIpv6("2001:470:1:2::1");
+    const tmpl = template.SynTemplate6.init(.{
+        .src_mac = .{0} ** 6,
+        .dst_mac = .{0} ** 6,
+        .src_ip = src_ip,
+        .src_port = 40000,
+        .cookie = cookie.Cookie.init(test_key),
+    });
+    var tb = ratelimit.TokenBucket.init(1000, 1000);
+    var clock = FakeClock{};
+    var sink = V6Sink{ .allocator = std.testing.allocator };
+    defer sink.frames.deinit(std.testing.allocator);
+
+    const sent = runV6(&eng, &tmpl, &tb, &sink, &clock, total, std.math.maxInt(u64));
+    try std.testing.expectEqual(total, sent);
+    try std.testing.expectEqual(@as(usize, @intCast(total)), sink.frames.items.len);
+
+    var seen = std.AutoHashMap([18]u8, void).init(std.testing.allocator);
+    defer seen.deinit();
+    for (sink.frames.items) |*f| {
+        try std.testing.expectEqual(@as(u16, 0x86dd), std.mem.readInt(u16, f[12..14], .big));
+        var dst: [16]u8 = undefined;
+        @memcpy(&dst, f[38..54]);
+        try std.testing.expect(!targets.isReserved6(dst));
+        try std.testing.expectEqual(@as(u16, 0), packet.tcpChecksum6(src_ip, dst, f[54..74]));
+        var key: [18]u8 = undefined;
+        @memcpy(key[0..16], &dst);
+        @memcpy(key[16..18], f[56..58]);
+        try std.testing.expect(!seen.contains(key));
+        try seen.put(key, {});
+    }
+    try std.testing.expectEqual(@as(usize, @intCast(total)), seen.count());
+}
 
 test "decoy groups resume across backpressure without re-sending the real probe" {
     const test_key = [_]u8{0} ** 16;

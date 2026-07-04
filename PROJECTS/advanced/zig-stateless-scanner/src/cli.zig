@@ -56,7 +56,8 @@ pub fn printHelp(io: std.Io, env: *std.process.Environ.Map) !void {
         \\  --src-port <n>   source port; UDP uses it as the cookie-range base (default 40000)
         \\  --gw-mac <mac>   gateway/dst MAC aa:bb:cc:dd:ee:ff (default 00:..:00)
         \\  --seed <n>       permutation seed (default: per-scan CSPRNG)
-        \\  --backend <b>    TX path: auto | xdp | afpacket (default auto; xdp needs a -Dxdp build)
+        \\  --backend <b>    TX path: auto | xdp | afpacket | connect (default auto;
+        \\                   xdp needs a -Dxdp build; connect = unprivileged TCP connect scan)
         \\
         \\scan-only options:
         \\  --udp            UDP scan: per-protocol payloads, ICMP type3/code3 = closed,
@@ -67,6 +68,18 @@ pub fn printHelp(io: std.Io, env: *std.process.Environ.Map) !void {
         \\  --wait <ms>      receive drain window after transmit (default 2000)
         \\  --json           emit NDJSON results to stdout (visuals go to stderr)
         \\  --color <when>   auto | always | never (default auto)
+        \\
+        \\connect-scan options (--backend connect / --connect; no CAP_NET_RAW needed):
+        \\  --connect              TCP connect() scan via the OS stack (open/closed/filtered)
+        \\  --concurrency <n>      concurrent connect workers (default 128)
+        \\  --connect-timeout <ms> per-connect timeout, filtered on no reply (default 3000)
+        \\
+        \\IPv6 scan (a --target with ':' is IPv6; raw stateless SYN, or add --connect):
+        \\  --target <cidr6>       bounded IPv6 prefix, e.g. 2001:db8::/112 (::/0 is refused)
+        \\  --src-ip6 <addr>       source IPv6 (default: resolved from --iface via /proc/net/if_inet6)
+        \\  --gw-ip6 <addr>        next-hop IPv6 to resolve via NDP (default: the iface v6 default route)
+        \\  --gw-mac <mac>         skip NDP and stamp this next-hop MAC directly
+        \\  --max-hosts <n>        host-address cap per IPv6 prefix (default 1048576)
         \\
         \\stealth / evasion (tx + scan; every flag requires --authorized-scan):
         \\  --authorized-scan          confirm you are authorized to scan the target

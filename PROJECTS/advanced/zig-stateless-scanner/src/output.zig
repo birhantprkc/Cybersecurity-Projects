@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const classify = @import("classify");
+const packet = @import("packet");
 
 pub const State = classify.State;
 pub const Result = classify.Result;
@@ -209,6 +210,60 @@ fn writeIp(out: *std.Io.Writer, ip: u32) !void {
     try out.print("{d}.{d}.{d}.{d}", .{ (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff });
 }
 
+pub const max_addr_str: usize = 45;
+
+fn writeIp6(out: *std.Io.Writer, b: [16]u8) !void {
+    var groups: [8]u16 = undefined;
+    for (0..8) |i| groups[i] = (@as(u16, b[i * 2]) << 8) | b[i * 2 + 1];
+
+    var best_start: usize = 8;
+    var best_len: usize = 1;
+    var i: usize = 0;
+    while (i < 8) {
+        if (groups[i] != 0) {
+            i += 1;
+            continue;
+        }
+        var j = i + 1;
+        while (j < 8 and groups[j] == 0) j += 1;
+        if (j - i > best_len) {
+            best_len = j - i;
+            best_start = i;
+        }
+        i = j;
+    }
+    const compress = best_start < 8;
+
+    var k: usize = 0;
+    var first = true;
+    while (k < 8) {
+        if (compress and k == best_start) {
+            try out.writeAll("::");
+            k += best_len;
+            first = true;
+            continue;
+        }
+        if (!first) try out.writeByte(':');
+        try out.print("{x}", .{groups[k]});
+        first = false;
+        k += 1;
+    }
+}
+
+fn writeAddr(out: *std.Io.Writer, addr: packet.Addr) !void {
+    switch (addr) {
+        .v4 => |ip| try writeIp(out, ip),
+        .v6 => |b| try writeIp6(out, b),
+    }
+}
+
+fn addrWidth(addr: packet.Addr) usize {
+    var buf: [max_addr_str]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    writeAddr(&w, addr) catch return max_addr_str;
+    return w.end;
+}
+
 fn stateName(st: State) []const u8 {
     return switch (st) {
         .open => "open",
@@ -351,7 +406,7 @@ pub const Dashboard = struct {
 
 pub fn emitJson(out: *std.Io.Writer, r: Result, proto: []const u8) !void {
     try out.print("{{\"ip\":\"", .{});
-    try writeIp(out, r.ip);
+    try writeAddr(out, r.addr);
     try out.print("\",\"port\":{d},\"proto\":\"{s}\",\"state\":\"{s}\"}}\n", .{ r.port, proto, stateName(r.state) });
 }
 
@@ -364,10 +419,10 @@ fn repeat(out: *std.Io.Writer, cell: []const u8, n: usize) !void {
     while (i < n) : (i += 1) try out.writeAll(cell);
 }
 
-fn rule(out: *std.Io.Writer, level: ColorLevel, left: []const u8, mid: []const u8, right: []const u8) !void {
+fn rule(out: *std.Io.Writer, level: ColorLevel, hw: usize, left: []const u8, mid: []const u8, right: []const u8) !void {
     try setFg(out, level, chrome_gray);
     try out.writeAll(left);
-    try repeat(out, box_h, w_host + 2);
+    try repeat(out, box_h, hw + 2);
     try out.writeAll(mid);
     try repeat(out, box_h, w_port + 2);
     try out.writeAll(mid);
@@ -383,14 +438,17 @@ fn pad(out: *std.Io.Writer, n: usize) !void {
 }
 
 pub fn renderTable(out: *std.Io.Writer, level: ColorLevel, results: []const Result) !void {
+    var hw: usize = "HOST".len;
+    for (results) |r| hw = @max(hw, addrWidth(r.addr));
+
     try out.writeAll("  ");
-    try rule(out, level, "\u{250c}", "\u{252c}", "\u{2510}");
+    try rule(out, level, hw, "\u{250c}", "\u{252c}", "\u{2510}");
 
     try out.writeAll("  ");
     try span(out, level, chrome_gray, "\u{2502} ");
     try setFg(out, level, bright_white);
     try out.writeAll("HOST");
-    try pad(out, w_host - "HOST".len);
+    try pad(out, hw - "HOST".len);
     try span(out, level, chrome_gray, " \u{2502} ");
     try setFg(out, level, bright_white);
     try pad(out, w_port - "PORT".len);
@@ -403,12 +461,12 @@ pub fn renderTable(out: *std.Io.Writer, level: ColorLevel, results: []const Resu
     try out.writeByte('\n');
 
     try out.writeAll("  ");
-    try rule(out, level, "\u{251c}", "\u{253c}", "\u{2524}");
+    try rule(out, level, hw, "\u{251c}", "\u{253c}", "\u{2524}");
 
     for (results) |r| {
-        var ipbuf: [15]u8 = undefined;
+        var ipbuf: [max_addr_str]u8 = undefined;
         var ipw = std.Io.Writer.fixed(&ipbuf);
-        try writeIp(&ipw, r.ip);
+        try writeAddr(&ipw, r.addr);
         const ip_str = ipbuf[0..ipw.end];
 
         try out.writeAll("  ");
@@ -416,7 +474,7 @@ pub fn renderTable(out: *std.Io.Writer, level: ColorLevel, results: []const Resu
         try setFg(out, level, bright_white);
         try out.writeAll(ip_str);
         try resetFg(out, level);
-        try pad(out, w_host - ip_str.len);
+        try pad(out, hw - ip_str.len);
 
         try span(out, level, chrome_gray, " \u{2502} ");
         var portbuf: [5]u8 = undefined;
@@ -437,12 +495,15 @@ pub fn renderTable(out: *std.Io.Writer, level: ColorLevel, results: []const Resu
     }
 
     try out.writeAll("  ");
-    try rule(out, level, "\u{2514}", "\u{2534}", "\u{2518}");
+    try rule(out, level, hw, "\u{2514}", "\u{2534}", "\u{2518}");
 }
 
 pub fn ipPortLess(_: void, a: Result, b: Result) bool {
-    if (a.ip != b.ip) return a.ip < b.ip;
-    return a.port < b.port;
+    return switch (packet.Addr.order(a.addr, b.addr)) {
+        .lt => true,
+        .gt => false,
+        .eq => a.port < b.port,
+    };
 }
 
 pub const ServiceRow = struct {
@@ -668,13 +729,13 @@ test "Stats.record tallies per-state and total found without cross-talk" {
 test "emitJson writes one greppable NDJSON object per result with its proto" {
     var buf: [128]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try emitJson(&w, .{ .ip = 0x0a000005, .port = 80, .state = .open }, "tcp");
+    try emitJson(&w, Result.v4(0x0a000005, 80, .open), "tcp");
     try std.testing.expectEqualStrings(
         "{\"ip\":\"10.0.0.5\",\"port\":80,\"proto\":\"tcp\",\"state\":\"open\"}\n",
         buf[0..w.end],
     );
     w = std.Io.Writer.fixed(&buf);
-    try emitJson(&w, .{ .ip = 0x08080808, .port = 53, .state = .closed }, "udp");
+    try emitJson(&w, Result.v4(0x08080808, 53, .closed), "udp");
     try std.testing.expectEqualStrings(
         "{\"ip\":\"8.8.8.8\",\"port\":53,\"proto\":\"udp\",\"state\":\"closed\"}\n",
         buf[0..w.end],
@@ -695,8 +756,8 @@ test "renderTable with no color is plain and contains every host row" {
     var buf: [1024]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     const rows = [_]Result{
-        .{ .ip = 0x0a000005, .port = 80, .state = .open },
-        .{ .ip = 0x0a000006, .port = 443, .state = .closed },
+        Result.v4(0x0a000005, 80, .open),
+        Result.v4(0x0a000006, 443, .closed),
     };
     try renderTable(&w, .none, &rows);
     const text = buf[0..w.end];
@@ -721,10 +782,39 @@ test "dashboard non-interactive frame is a single plain line" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\n"));
 }
 
+test "writeIp6 renders RFC 5952 compressed IPv6 (longest-first run, no single-group elision)" {
+    const cases = .{
+        .{ [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, "::" },
+        .{ [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, "::1" },
+        .{ [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, "2001:db8::1" },
+        .{ [16]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, "fe80::" },
+        .{ [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, "2001:db8:1::1" },
+        .{ [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6 }, "2001:db8:1:2:3:4:5:6" },
+        .{ [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xc0, 0xa8, 0, 1 }, "::ffff:c0a8:1" },
+    };
+    inline for (cases) |c| {
+        var buf: [max_addr_str]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try writeIp6(&w, c[0]);
+        try std.testing.expectEqualStrings(c[1], buf[0..w.end]);
+    }
+}
+
+test "emitJson renders an IPv6 result address" {
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const a = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try emitJson(&w, Result.v6(a, 443, .open), "tcp");
+    try std.testing.expectEqualStrings(
+        "{\"ip\":\"2001:db8::1\",\"port\":443,\"proto\":\"tcp\",\"state\":\"open\"}\n",
+        buf[0..w.end],
+    );
+}
+
 test "ipPortLess orders by ip then port" {
-    const a = Result{ .ip = 0x0a000001, .port = 443, .state = .open };
-    const b = Result{ .ip = 0x0a000001, .port = 80, .state = .open };
-    const c = Result{ .ip = 0x0a000002, .port = 1, .state = .open };
+    const a = Result.v4(0x0a000001, 443, .open);
+    const b = Result.v4(0x0a000001, 80, .open);
+    const c = Result.v4(0x0a000002, 1, .open);
     try std.testing.expect(ipPortLess({}, b, a));
     try std.testing.expect(ipPortLess({}, a, c));
     try std.testing.expect(!ipPortLess({}, a, b));

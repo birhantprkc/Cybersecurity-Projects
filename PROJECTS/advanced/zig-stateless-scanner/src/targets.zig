@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const numtheory = @import("numtheory");
+const netutil = @import("netutil");
 
 pub const Range = struct {
     start: u32,
@@ -220,6 +221,142 @@ pub const Engine = struct {
     }
 };
 
+pub const default_max_hosts6: u64 = 1 << 20;
+
+pub const Cidr6 = struct {
+    base: [16]u8,
+    prefix: u8,
+};
+
+const Reserved6 = struct { prefix: [16]u8, bits: u8 };
+
+const reserved6 = [_]Reserved6{
+    .{ .prefix = [_]u8{0} ** 16, .bits = 128 },
+    .{ .prefix = [_]u8{0} ** 15 ++ [_]u8{1}, .bits = 128 },
+    .{ .prefix = [_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff } ++ [_]u8{0} ** 4, .bits = 96 },
+    .{ .prefix = [_]u8{ 0x01, 0x00 } ++ [_]u8{0} ** 14, .bits = 8 },
+    .{ .prefix = [_]u8{ 0x20, 0x01, 0x0d, 0xb8 } ++ [_]u8{0} ** 12, .bits = 32 },
+    .{ .prefix = [_]u8{ 0xfc, 0x00 } ++ [_]u8{0} ** 14, .bits = 7 },
+    .{ .prefix = [_]u8{ 0xfe, 0x80 } ++ [_]u8{0} ** 14, .bits = 10 },
+    .{ .prefix = [_]u8{ 0xff, 0x00 } ++ [_]u8{0} ** 14, .bits = 8 },
+};
+
+fn inPrefix6(addr: [16]u8, prefix: [16]u8, bits: u8) bool {
+    const full = bits / 8;
+    for (0..full) |i| if (addr[i] != prefix[i]) return false;
+    const rem: u3 = @intCast(bits % 8);
+    if (rem != 0) {
+        const mask: u8 = @as(u8, 0xff) << @intCast(8 - @as(u4, rem));
+        if ((addr[full] & mask) != (prefix[full] & mask)) return false;
+    }
+    return true;
+}
+
+pub fn isReserved6(addr: [16]u8) bool {
+    for (reserved6) |res| {
+        if (inPrefix6(addr, res.prefix, res.bits)) return true;
+    }
+    return false;
+}
+
+fn maskAddr6(addr: [16]u8, prefix: u8) [16]u8 {
+    var out = addr;
+    var bit: usize = prefix;
+    while (bit < 128) : (bit += 1) {
+        const byte = bit / 8;
+        const off: u3 = @intCast(7 - (bit % 8));
+        out[byte] &= ~(@as(u8, 1) << off);
+    }
+    return out;
+}
+
+pub fn parseCidr6(text: []const u8) !Cidr6 {
+    const slash = std.mem.indexOfScalar(u8, text, '/') orelse return error.InvalidCidr;
+    const addr = try netutil.parseIpv6(text[0..slash]);
+    const prefix = std.fmt.parseInt(u8, text[slash + 1 ..], 10) catch return error.InvalidCidr;
+    if (prefix > 128) return error.InvalidCidr;
+    if (prefix == 0) return error.PrefixTooLarge;
+    return .{ .base = maskAddr6(addr, prefix), .prefix = prefix };
+}
+
+pub const Target6 = struct {
+    addr: [16]u8,
+    port: u16,
+};
+
+pub const Engine6 = struct {
+    base: [16]u8,
+    ports: []u16,
+    num_ports: u64,
+    host_count: u64,
+    total: u64,
+    prime: u64,
+    generator: u64,
+    current: u64,
+    steps_left: u64,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, cidr: Cidr6, ports: []const u16, seed: u64, max_hosts: u64) !Engine6 {
+        const host_bits: u8 = 128 - cidr.prefix;
+        if (host_bits >= 64) return error.PrefixTooLarge;
+        const host_count: u64 = if (host_bits == 0) 1 else (@as(u64, 1) << @intCast(host_bits));
+        if (host_count > max_hosts) return error.PrefixTooLarge;
+
+        const ports_copy = try allocator.dupe(u16, ports);
+        errdefer allocator.free(ports_copy);
+        const num_ports: u64 = @intCast(ports.len);
+        if (num_ports == 0 or host_count > std.math.maxInt(u64) / num_ports) return error.PrefixTooLarge;
+        const total = host_count * num_ports;
+        const prime = numtheory.smallestPrimeAbove(total);
+
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rand = prng.random();
+        const generator = numtheory.findPrimitiveRoot(prime, rand);
+        const start = rand.intRangeAtMost(u64, 1, prime - 1);
+
+        return .{
+            .base = cidr.base,
+            .ports = ports_copy,
+            .num_ports = num_ports,
+            .host_count = host_count,
+            .total = total,
+            .prime = prime,
+            .generator = generator,
+            .current = start,
+            .steps_left = prime - 1,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Engine6) void {
+        self.allocator.free(self.ports);
+    }
+
+    fn addrAt(self: *const Engine6, host_index: u64) [16]u8 {
+        var addr = self.base;
+        const lo = std.mem.readInt(u64, addr[8..16], .big);
+        std.mem.writeInt(u64, addr[8..16], lo | host_index, .big);
+        return addr;
+    }
+
+    pub fn next(self: *Engine6) ?Target6 {
+        while (self.steps_left > 0) {
+            self.current = numtheory.mulMod(self.current, self.generator, self.prime);
+            self.steps_left -= 1;
+            const idx = self.current;
+            if (idx >= 1 and idx <= self.total) {
+                const idx0 = idx - 1;
+                const host_pos = idx0 / self.num_ports;
+                const port_pos = idx0 % self.num_ports;
+                const addr = self.addrAt(host_pos);
+                if (isReserved6(addr)) continue;
+                return .{ .addr = addr, .port = self.ports[@intCast(port_pos)] };
+            }
+        }
+        return null;
+    }
+};
+
 test "parseCidr yields the right range and count" {
     const a = try parseCidr("10.0.0.0/24");
     try std.testing.expectEqual(@as(u32, 0x0a000000), a.start);
@@ -325,4 +462,65 @@ test "initShard rejects nonsensical shard counts" {
     try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 0, 0));
     try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 100, 0));
     try std.testing.expectError(error.InvalidShardCount, Engine.initShard(std.testing.allocator, &cidrs, &ports, 1, 2, 5));
+}
+
+test "parseCidr6 masks host bits, rejects ::/0 and bad prefixes" {
+    const c = try parseCidr6("2001:db8:1:2:3:4:5:6/64");
+    try std.testing.expectEqual([16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0 }, c.base);
+    try std.testing.expectEqual(@as(u8, 64), c.prefix);
+
+    const c120 = try parseCidr6("2001:470:1:2::ab/120");
+    try std.testing.expectEqual(@as(u8, 0), c120.base[15]);
+
+    try std.testing.expectError(error.PrefixTooLarge, parseCidr6("::/0"));
+    try std.testing.expectError(error.InvalidCidr, parseCidr6("2001:db8::/129"));
+    try std.testing.expectError(error.InvalidCidr, parseCidr6("2001:db8::"));
+}
+
+test "isReserved6 flags special-use IPv6 blocks and passes global space" {
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("::1")));
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("::")));
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("fe80::1")));
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("fc00::1")));
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("ff02::1")));
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("2001:db8::1")));
+    try std.testing.expect(isReserved6(try netutil.parseIpv6("::ffff:c0a8:1")));
+    try std.testing.expect(!isReserved6(try netutil.parseIpv6("2001:470:1:2::5")));
+    try std.testing.expect(!isReserved6(try netutil.parseIpv6("2606:4700:4700::1111")));
+}
+
+test "Engine6 is a bijection over a bounded prefix, every addr:port once, none reserved" {
+    const cidr = try parseCidr6("2001:470:1:2::/120");
+    const ports = [_]u16{ 80, 443 };
+    var eng = try Engine6.init(std.testing.allocator, cidr, &ports, 0xC0FFEE, default_max_hosts6);
+    defer eng.deinit();
+
+    try std.testing.expectEqual(@as(u64, 512), eng.total);
+    var seen = std.AutoHashMap(u160Key, void).init(std.testing.allocator);
+    defer seen.deinit();
+    var n: u64 = 0;
+    while (eng.next()) |t| {
+        try std.testing.expect(!isReserved6(t.addr));
+        const key = u160Key{ .addr = t.addr, .port = t.port };
+        try std.testing.expect(!seen.contains(key));
+        try seen.put(key, {});
+        n += 1;
+    }
+    try std.testing.expectEqual(@as(u64, 512), n);
+}
+
+const u160Key = struct { addr: [16]u8, port: u16 };
+
+test "Engine6 rejects prefixes whose host space is too large" {
+    const ports = [_]u16{80};
+    try std.testing.expectError(error.PrefixTooLarge, Engine6.init(std.testing.allocator, try parseCidr6("2001:470::/64"), &ports, 1, default_max_hosts6));
+    try std.testing.expectError(error.PrefixTooLarge, Engine6.init(std.testing.allocator, try parseCidr6("2001:470::/100"), &ports, 1, default_max_hosts6));
+    var eng = try Engine6.init(std.testing.allocator, try parseCidr6("2001:470::/112"), &ports, 1, default_max_hosts6);
+    eng.deinit();
+}
+
+test "Engine6 rejects a host-times-port product that would overflow u64" {
+    const ports = [_]u16{ 1, 2, 3, 4 };
+    const cidr = try parseCidr6("2001:470::/65");
+    try std.testing.expectError(error.PrefixTooLarge, Engine6.init(std.testing.allocator, cidr, &ports, 1, std.math.maxInt(u64)));
 }

@@ -9,6 +9,7 @@ const cookie = @import("cookie");
 pub const Result = classify.Result;
 pub const State = classify.State;
 pub const TcpClassifier = classify.TcpClassifier;
+pub const TcpClassifier6 = classify.TcpClassifier6;
 pub const UdpClassifier = classify.UdpClassifier;
 
 const RECV_BUF_LEN: usize = 2048;
@@ -17,7 +18,15 @@ const NS_PER_MS: u64 = 1_000_000;
 const NS_PER_SEC: u64 = 1_000_000_000;
 
 pub fn resultKey(r: Result) u64 {
-    return (@as(u64, r.ip) << PORT_BITS) | r.port;
+    return switch (r.addr) {
+        .v4 => |ip| (@as(u64, ip) << PORT_BITS) | r.port,
+        .v6 => |b| blk: {
+            var h = std.hash.Wyhash.init(r.port);
+            h.update(&b);
+            const k = h.final();
+            break :blk if (k == std.math.maxInt(u64)) k -% 1 else k;
+        },
+    };
 }
 
 pub fn run(source: anytype, clf: anytype, dd: *dedup.Dedup, sink: anytype) void {
@@ -39,6 +48,9 @@ pub const QueueSink = struct {
 };
 
 const linux = std.os.linux;
+
+pub const ETH_P_IP: u16 = 0x0800;
+pub const ETH_P_IPV6: u16 = 0x86dd;
 
 pub const OpenError = error{
     NeedCapNetRaw,
@@ -85,11 +97,11 @@ pub const Receiver = struct {
         return @as(u64, @intCast(ts.sec)) * NS_PER_SEC + @as(u64, @intCast(ts.nsec));
     }
 
-    pub fn open(ifname: []const u8, tx_done: *std.atomic.Value(bool), drain_window_ns: u64, hard_cap_ns: u64) OpenError!Receiver {
+    pub fn open(ifname: []const u8, proto: u16, tx_done: *std.atomic.Value(bool), drain_window_ns: u64, hard_cap_ns: u64) OpenError!Receiver {
         const rc_sock = linux.socket(
             linux.AF.PACKET,
             linux.SOCK.RAW,
-            std.mem.nativeToBig(u16, @as(u16, linux.ETH.P.IP)),
+            std.mem.nativeToBig(u16, proto),
         );
         switch (linux.errno(rc_sock)) {
             .SUCCESS => {},
@@ -111,7 +123,7 @@ pub const Receiver = struct {
 
         var sll = std.mem.zeroes(linux.sockaddr.ll);
         sll.family = linux.AF.PACKET;
-        sll.protocol = std.mem.nativeToBig(u16, @as(u16, linux.ETH.P.IP));
+        sll.protocol = std.mem.nativeToBig(u16, proto);
         sll.ifindex = ifindex;
         if (linux.errno(linux.bind(fd, @ptrCast(&sll), @sizeOf(linux.sockaddr.ll))) != .SUCCESS)
             return error.BindFailed;

@@ -42,12 +42,45 @@ pub const UdpHdr = extern struct {
     checksum: u16,
 };
 
+pub const Ipv6Hdr = extern struct {
+    version_tc_flow: u32,
+    payload_len: u16,
+    next_header: u8,
+    hop_limit: u8,
+    src: [16]u8,
+    dst: [16]u8,
+};
+
 comptime {
     std.debug.assert(@sizeOf(EthHdr) == 14);
     std.debug.assert(@sizeOf(Ipv4Hdr) == 20);
     std.debug.assert(@sizeOf(TcpHdr) == 20);
     std.debug.assert(@sizeOf(UdpHdr) == 8);
+    std.debug.assert(@sizeOf(Ipv6Hdr) == 40);
 }
+
+pub const Addr = union(enum) {
+    v4: u32,
+    v6: [16]u8,
+
+    pub fn eql(a: Addr, b: Addr) bool {
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+        return switch (a) {
+            .v4 => |x| x == b.v4,
+            .v6 => |x| std.mem.eql(u8, &x, &b.v6),
+        };
+    }
+
+    pub fn order(a: Addr, b: Addr) std.math.Order {
+        const fam_a: u2 = if (a == .v4) 0 else 1;
+        const fam_b: u2 = if (b == .v4) 0 else 1;
+        if (fam_a != fam_b) return std.math.order(fam_a, fam_b);
+        return switch (a) {
+            .v4 => |x| std.math.order(x, b.v4),
+            .v6 => |x| std.mem.order(u8, &x, &b.v6),
+        };
+    }
+};
 
 pub fn checksum(bytes: []const u8) u16 {
     var sum: u32 = 0;
@@ -124,6 +157,27 @@ pub fn tcpChecksum(src_be: u32, dst_be: u32, segment: []const u8) u16 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
     return ~@as(u16, @truncate(sum));
+}
+
+pub fn pseudoChecksum6(src: [16]u8, dst: [16]u8, next_header: u8, payload: []const u8) u16 {
+    var sum: u32 = 0;
+    var i: usize = 0;
+    while (i + 1 < src.len) : (i += 2) sum += (@as(u32, src[i]) << 8) | src[i + 1];
+    i = 0;
+    while (i + 1 < dst.len) : (i += 2) sum += (@as(u32, dst[i]) << 8) | dst[i + 1];
+    const len: u32 = @intCast(payload.len);
+    sum += (len >> 16) & 0xffff;
+    sum += len & 0xffff;
+    sum += next_header;
+    i = 0;
+    while (i + 1 < payload.len) : (i += 2) sum += (@as(u32, payload[i]) << 8) | payload[i + 1];
+    if (i < payload.len) sum += @as(u32, payload[i]) << 8;
+    while (sum >> 16 != 0) sum = (sum & 0xffff) + (sum >> 16);
+    return ~@as(u16, @truncate(sum));
+}
+
+pub fn tcpChecksum6(src: [16]u8, dst: [16]u8, segment: []const u8) u16 {
+    return pseudoChecksum6(src, dst, 6, segment);
 }
 
 pub fn udpChecksum(src_be: u32, dst_be: u32, segment: []const u8) u16 {
@@ -429,6 +483,44 @@ test "tcpChecksum self-verifies: a segment with its correct checksum folds to 0"
     try std.testing.expectEqual(@as(u16, 0), tcpChecksum(src, dst, std.mem.asBytes(&tcp)));
 }
 
+test "Ipv6 header is wire-exact 40 bytes" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(Ipv6Hdr));
+}
+
+test "tcpChecksum6 equals a full RFC 1071 sum over the assembled IPv6 pseudo-header (independent path)" {
+    const src = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    const dst = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
+    const seg = [_]u8{ 0xde, 0xad, 0x00, 0x50, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 0x50, 0x02, 0x04, 0x00, 0, 0, 0, 0 };
+    var buf: [40 + seg.len]u8 = undefined;
+    @memcpy(buf[0..16], &src);
+    @memcpy(buf[16..32], &dst);
+    std.mem.writeInt(u32, buf[32..36], @intCast(seg.len), .big);
+    buf[36] = 0;
+    buf[37] = 0;
+    buf[38] = 0;
+    buf[39] = 6;
+    @memcpy(buf[40..], &seg);
+    try std.testing.expectEqual(checksum(&buf), tcpChecksum6(src, dst, &seg));
+}
+
+test "tcpChecksum6 self-verifies: a correctly-summed segment folds back to 0" {
+    const src = [16]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    const dst = [16]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
+    var tcp = TcpHdr{
+        .src_port = std.mem.nativeToBig(u16, 54321),
+        .dst_port = std.mem.nativeToBig(u16, 443),
+        .seq = std.mem.nativeToBig(u32, 0x1234_5678),
+        .ack = 0,
+        .data_off_ns = 0x50,
+        .flags = 0x02,
+        .window = std.mem.nativeToBig(u16, 65535),
+        .checksum = 0,
+        .urgent = 0,
+    };
+    tcp.checksum = std.mem.nativeToBig(u16, tcpChecksum6(src, dst, std.mem.asBytes(&tcp)));
+    try std.testing.expectEqual(@as(u16, 0), tcpChecksum6(src, dst, std.mem.asBytes(&tcp)));
+}
+
 test "udpChecksum self-verifies: a correct datagram re-sums to the 0xFFFF all-ones marker" {
     const src = std.mem.nativeToBig(u32, 0x7f000001);
     const dst = std.mem.nativeToBig(u32, 0x08080808);
@@ -528,4 +620,29 @@ test "scan-type and OS-profile parsers round-trip the CLI spellings" {
     try std.testing.expect(ScanType.parse("bogus") == null);
     try std.testing.expectEqual(OsProfile.macos, OsProfile.parse("macos").?);
     try std.testing.expect(OsProfile.parse("bogus") == null);
+}
+
+test "Addr.eql distinguishes families and values" {
+    const a = Addr{ .v4 = 0x0a000001 };
+    const b = Addr{ .v4 = 0x0a000001 };
+    const c = Addr{ .v4 = 0x0a000002 };
+    const v6a = Addr{ .v6 = [_]u8{0} ** 15 ++ [_]u8{1} };
+    const v6b = Addr{ .v6 = [_]u8{0} ** 15 ++ [_]u8{1} };
+    const v6c = Addr{ .v6 = [_]u8{0} ** 15 ++ [_]u8{2} };
+    try std.testing.expect(a.eql(b));
+    try std.testing.expect(!a.eql(c));
+    try std.testing.expect(v6a.eql(v6b));
+    try std.testing.expect(!v6a.eql(v6c));
+    try std.testing.expect(!a.eql(v6a));
+}
+
+test "Addr.order sorts v4 before v6, then by value" {
+    const v4lo = Addr{ .v4 = 1 };
+    const v4hi = Addr{ .v4 = 2 };
+    const v6lo = Addr{ .v6 = [_]u8{0} ** 16 };
+    const v6hi = Addr{ .v6 = [_]u8{0} ** 15 ++ [_]u8{1} };
+    try std.testing.expectEqual(std.math.Order.lt, v4lo.order(v4hi));
+    try std.testing.expectEqual(std.math.Order.lt, v4hi.order(v6lo));
+    try std.testing.expectEqual(std.math.Order.lt, v6lo.order(v6hi));
+    try std.testing.expectEqual(std.math.Order.eq, v6hi.order(v6hi));
 }

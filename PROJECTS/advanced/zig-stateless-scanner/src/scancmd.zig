@@ -15,6 +15,9 @@ const netutil = @import("netutil");
 const output = @import("output");
 const stealth = @import("stealth");
 const service = @import("service");
+const connect = @import("connect");
+const rawprobe = @import("rawprobe");
+const ndp = @import("ndp");
 
 const default_iface = "lo";
 const default_rate: u64 = 10_000;
@@ -216,6 +219,329 @@ fn terminalCols(fd: i32) ?u16 {
     return ws.col;
 }
 
+fn txWorkerV6(engine: *targets.Engine6, tmpl: *const template.SynTemplate6, bucket: *ratelimit.TokenBucket, sink: *TxSink, max_packets: u64, budget_ns: u64, tx_done: *std.atomic.Value(bool)) u64 {
+    var clock = netutil.RealClock{};
+    const deadline_ns = clock.now() +| budget_ns;
+    const sent = tx.runV6(engine, tmpl, bucket, sink, &clock, max_packets, deadline_ns);
+    tx_done.store(true, .release);
+    return sent;
+}
+
+fn rxWorkerV6(receiver: *rx.Receiver, clf: rx.TcpClassifier6, dd: *dedup.Dedup, sink: *rx.QueueSink, rx_done: *std.atomic.Value(bool)) void {
+    rx.run(receiver, clf, dd, sink);
+    rx_done.store(true, .release);
+}
+
+fn resolveV6Gateway(io: std.Io, args: []const []const u8, ifname: []const u8, src_ip6: [16]u8, src_mac: [6]u8, derr: *std.Io.Writer) !?[6]u8 {
+    _ = io;
+    if (netutil.getFlag(args, "--gw-mac")) |m| return try netutil.parseMac(m);
+    const next_hop = if (netutil.getFlag(args, "--gw-ip6")) |g| try netutil.parseIpv6(g) else netutil.defaultGateway6(ifname) orelse {
+        try derr.writeAll("scan: IPv6 raw scan needs a next hop: pass --gw-mac <mac>, or --gw-ip6 <addr> to resolve it via NDP\n");
+        try derr.flush();
+        return null;
+    };
+    return ndp.resolve(ifname, src_ip6, src_mac, next_hop, 1500) catch |e| {
+        try derr.print("scan: NDP neighbor resolution failed ({s}); pass --gw-mac explicitly\n", .{@errorName(e)});
+        try derr.flush();
+        return null;
+    };
+}
+
+fn runV6Scan(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, env: *std.process.Environ.Map, target_text: []const u8, ifname: []const u8, rate: u64, backend_choice: packet_io.Choice, derr: *std.Io.Writer) !void {
+    var obuf: [4096]u8 = undefined;
+    var ow = std.Io.File.stdout().writer(io, &obuf);
+    const out = &ow.interface;
+
+    if (netutil.hasFlag(args, "--udp")) {
+        try derr.writeAll("scan: IPv6 UDP scanning is not supported yet; run a TCP SYN scan or --connect\n");
+        try derr.flush();
+        return;
+    }
+    if (netutil.getFlag(args, "--scan-type") != null or netutil.getFlag(args, "--os-template") != null or
+        netutil.getFlag(args, "--decoys") != null or netutil.getFlag(args, "--jitter") != null or
+        netutil.hasFlag(args, "--source-port-rotation"))
+    {
+        try derr.writeAll("  note: stealth/scan-type options are not yet wired for IPv6; running a plain SYN scan\n");
+    }
+
+    const ports = if (netutil.getFlag(args, "--ports")) |p| try netutil.parsePorts(allocator, p) else try allocator.dupe(u16, &default_tcp_ports);
+    const src_port = if (netutil.getFlag(args, "--src-port")) |p| try std.fmt.parseInt(u16, p, 10) else default_src_port;
+    const wait_ms = if (netutil.getFlag(args, "--wait")) |w| try std.fmt.parseInt(i32, w, 10) else default_wait_ms;
+    const json = netutil.hasFlag(args, "--json");
+    const max_hosts = if (netutil.getFlag(args, "--max-hosts")) |m| try std.fmt.parseInt(u64, m, 10) else targets.default_max_hosts6;
+
+    var seed: u64 = undefined;
+    if (netutil.getFlag(args, "--seed")) |s| {
+        seed = try std.fmt.parseInt(u64, s, 10);
+    } else {
+        var seed_bytes: [8]u8 = undefined;
+        try io.randomSecure(&seed_bytes);
+        seed = std.mem.readInt(u64, &seed_bytes, .little);
+    }
+
+    const src_ip6 = if (netutil.getFlag(args, "--src-ip6")) |s| try netutil.parseIpv6(s) else netutil.resolveSrcIp6(ifname) catch {
+        try derr.print("scan: no IPv6 source address on '{s}' (assign one, or pass --src-ip6 <addr>)\n", .{ifname});
+        try derr.flush();
+        return;
+    };
+    const src_mac = try netutil.resolveSrcMac(ifname);
+    const gw_mac = (try resolveV6Gateway(io, args, ifname, src_ip6, src_mac, derr)) orelse return;
+
+    const cidr = targets.parseCidr6(target_text) catch |e| {
+        try derr.print("scan: invalid IPv6 target '{s}' ({s})\n", .{ target_text, @errorName(e) });
+        try derr.flush();
+        return;
+    };
+    var eng = targets.Engine6.init(allocator, cidr, ports, seed, max_hosts) catch |e| switch (e) {
+        error.PrefixTooLarge => {
+            try derr.print("scan: IPv6 prefix '{s}' is too large to enumerate (over --max-hosts {d}); narrow the prefix or raise --max-hosts\n", .{ target_text, max_hosts });
+            try derr.flush();
+            return;
+        },
+        else => return e,
+    };
+    defer eng.deinit();
+    const count = if (netutil.getFlag(args, "--count")) |c| try std.fmt.parseInt(u64, c, 10) else eng.total;
+
+    const ck = try cookie.Cookie.random(io);
+    const tmpl = template.SynTemplate6.init(.{
+        .src_mac = src_mac,
+        .dst_mac = gw_mac,
+        .src_ip = src_ip6,
+        .src_port = src_port,
+        .cookie = ck,
+    });
+    var bucket = ratelimit.TokenBucket.init(rate, rate);
+
+    const choice = output.parseColorChoice(netutil.getFlag(args, "--color"));
+    const out_level = output.envLevel(io, std.Io.File.stdout(), env, choice);
+    const err_level = output.envLevel(io, std.Io.File.stderr(), env, choice);
+    const stderr_tty = std.Io.File.stderr().isTty(io) catch false;
+    const wide_enough = if (terminalCols(2)) |c| c >= min_dashboard_cols else true;
+    const interactive = stderr_tty and wide_enough;
+
+    const dash_total = @min(count, eng.total);
+    const drain_window_ns: u64 = @as(u64, @intCast(@max(wait_ms, 0))) * ns_per_ms;
+    const est_tx_ns: u64 = if (rate > 0) (dash_total / rate) *| ns_per_sec else rx_hard_cap_floor_ns;
+    const tx_budget_ns: u64 = (est_tx_ns *| 4) +| rx_hard_cap_floor_ns;
+    const hard_cap_ns: u64 = tx_budget_ns +| drain_window_ns;
+
+    var backend = packet_io.select(allocator, ifname, backend_choice, .{}, .{}, derr) catch |err| switch (err) {
+        error.NeedCapNetRaw => {
+            try derr.writeAll(need_cap_hint);
+            try derr.flush();
+            return;
+        },
+        error.XdpNotCompiledIn => {
+            try derr.writeAll("scan: --backend xdp needs a build with -Dxdp\n");
+            try derr.flush();
+            return;
+        },
+        else => return err,
+    };
+    defer backend.close();
+    try derr.print("  using {s}\n", .{packet_io.kindLabel(backend.kind())});
+
+    var tx_done = std.atomic.Value(bool).init(false);
+    var rx_done = std.atomic.Value(bool).init(false);
+
+    var receiver = rx.Receiver.open(ifname, rx.ETH_P_IPV6, &tx_done, drain_window_ns, hard_cap_ns) catch |err| switch (err) {
+        error.NeedCapNetRaw => {
+            try derr.writeAll(need_cap_hint);
+            try derr.flush();
+            return;
+        },
+        else => return err,
+    };
+    defer receiver.close();
+
+    var dd = try dedup.Dedup.init(allocator, dedup_capacity);
+    defer dd.deinit();
+    var qbuf: [queue_capacity]rx.Result = undefined;
+    var queue = std.Io.Queue(rx.Result).init(&qbuf);
+
+    var found_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer found_arena.deinit();
+    const found_alloc = found_arena.allocator();
+    var found: std.ArrayList(rx.Result) = .empty;
+
+    var stats: output.Stats = .{};
+    const json_out: ?*std.Io.Writer = if (json) out else null;
+
+    try derr.print("zingela  SYN scan (IPv6)  target {s}  iface {s}  rate {d} pps  ports {d}\n", .{ target_text, ifname, rate, ports.len });
+    try derr.flush();
+
+    var clock = netutil.RealClock{};
+    const t0 = clock.now();
+
+    var tx_sink = TxSink{ .backend = &backend, .sent = &stats.sent.v };
+    var rx_sink = rx.QueueSink{ .queue = &queue, .io = io };
+
+    var tx_fut = (io.concurrent(txWorkerV6, .{ &eng, &tmpl, &bucket, &tx_sink, count, tx_budget_ns, &tx_done })) catch {
+        try derr.writeAll(concurrency_hint);
+        try derr.flush();
+        return;
+    };
+    var rx_fut = (io.concurrent(rxWorkerV6, .{ &receiver, rx.TcpClassifier6{ .ck = ck }, &dd, &rx_sink, &rx_done })) catch {
+        _ = tx_fut.await(io);
+        try derr.writeAll(concurrency_hint);
+        try derr.flush();
+        return;
+    };
+
+    var dash = output.Dashboard.init(err_level, interactive, dash_total);
+    const render_interval_ns: u64 = if (interactive) render_tick_interactive_ns else render_tick_plain_ns;
+    var drain_buf: [drain_batch]rx.Result = undefined;
+    var last_render: u64 = 0;
+
+    while (!(tx_done.load(.acquire) and rx_done.load(.acquire))) {
+        drainQueue(io, &queue, drain_buf[0..], &found, found_alloc, &stats, json_out, "tcp");
+        if (json) out.flush() catch {};
+        const now = clock.now();
+        if (last_render == 0 or now -| last_render >= render_interval_ns) {
+            dash.render(derr, &stats, now -| t0) catch {};
+            last_render = now;
+        }
+        clock.sleepNs(drain_tick_ns);
+    }
+
+    const sent = tx_fut.await(io);
+    rx_fut.await(io);
+    queue.close(io);
+    drainQueue(io, &queue, drain_buf[0..], &found, found_alloc, &stats, json_out, "tcp");
+    if (json) out.flush() catch {};
+    dash.render(derr, &stats, clock.now() -| t0) catch {};
+
+    var open_n: u64 = 0;
+    var closed_n: u64 = 0;
+    var filtered_n: u64 = 0;
+    var unfiltered_n: u64 = 0;
+    for (found.items) |r| switch (r.state) {
+        .open => open_n += 1,
+        .closed => closed_n += 1,
+        .filtered => filtered_n += 1,
+        .unfiltered => unfiltered_n += 1,
+    };
+
+    if (!json) {
+        if (found.items.len > 0) {
+            std.mem.sort(rx.Result, found.items, {}, output.ipPortLess);
+            try out.writeByte('\n');
+            try output.renderTable(out, out_level, found.items);
+            try out.flush();
+        } else {
+            try derr.writeAll("  no open, closed, or filtered responses observed\n");
+            if (sent > 0) try derr.writeAll("  (if a cloud/VM hypervisor is filtering raw sends upstream, retry with --connect)\n");
+        }
+    }
+
+    const elapsed_s = @as(f64, @floatFromInt(clock.now() - t0)) / @as(f64, @floatFromInt(ns_per_sec));
+    try derr.writeByte('\n');
+    try output.renderSummary(derr, err_level, sent, "SYN", ifname, elapsed_s, open_n, closed_n, filtered_n, unfiltered_n, 0);
+    try derr.flush();
+}
+
+fn runConnect(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    env: *std.process.Environ.Map,
+    target_text: []const u8,
+    ifname: []const u8,
+    rate: u64,
+    is_udp: bool,
+    json: bool,
+    derr: *std.Io.Writer,
+) !void {
+    if (is_udp) {
+        try derr.writeAll("scan: connect mode is TCP-only; --udp is not supported with --backend connect\n");
+        try derr.flush();
+        return;
+    }
+    if (netutil.hasFlag(args, "--banners")) {
+        try derr.writeAll("  note: --banners is unavailable in connect mode; reporting open/closed/filtered only\n");
+    }
+
+    const ports = if (netutil.getFlag(args, "--ports")) |p|
+        try netutil.parsePorts(allocator, p)
+    else
+        try allocator.dupe(u16, &default_tcp_ports);
+
+    var seed: u64 = undefined;
+    if (netutil.getFlag(args, "--seed")) |s| {
+        seed = try std.fmt.parseInt(u64, s, 10);
+    } else {
+        var seed_bytes: [8]u8 = undefined;
+        try io.randomSecure(&seed_bytes);
+        seed = std.mem.readInt(u64, &seed_bytes, .little);
+    }
+
+    const concurrency = if (netutil.getFlag(args, "--concurrency")) |c| try std.fmt.parseInt(usize, c, 10) else connect.default_concurrency;
+    const timeout_ms = if (netutil.getFlag(args, "--connect-timeout")) |t| try std.fmt.parseInt(u64, t, 10) else connect.default_timeout_ms;
+    const max_hosts = if (netutil.getFlag(args, "--max-hosts")) |m| try std.fmt.parseInt(u64, m, 10) else targets.default_max_hosts6;
+
+    const choice = output.parseColorChoice(netutil.getFlag(args, "--color"));
+    const out_level = output.envLevel(io, std.Io.File.stdout(), env, choice);
+    const err_level = output.envLevel(io, std.Io.File.stderr(), env, choice);
+    const stderr_tty = std.Io.File.stderr().isTty(io) catch false;
+    const wide_enough = if (terminalCols(2)) |c| c >= min_dashboard_cols else true;
+    const interactive = stderr_tty and wide_enough;
+    try derr.flush();
+
+    if (std.mem.indexOfScalar(u8, target_text, ':') != null) {
+        const cidr = targets.parseCidr6(target_text) catch |e| {
+            try derr.print("scan: invalid IPv6 target '{s}' ({s})\n", .{ target_text, @errorName(e) });
+            try derr.flush();
+            return;
+        };
+        var eng = targets.Engine6.init(allocator, cidr, ports, seed, max_hosts) catch |e| switch (e) {
+            error.PrefixTooLarge => {
+                try derr.print("scan: IPv6 prefix '{s}' is too large to enumerate (over --max-hosts {d}); narrow the prefix or raise --max-hosts\n", .{ target_text, max_hosts });
+                try derr.flush();
+                return;
+            },
+            else => return e,
+        };
+        defer eng.deinit();
+        const count = if (netutil.getFlag(args, "--count")) |c| try std.fmt.parseInt(u64, c, 10) else eng.total;
+        try connect.run(allocator, .{
+            .source = .{ .v6 = &eng },
+            .count = count,
+            .total = @min(count, eng.total),
+            .rate = rate,
+            .concurrency = concurrency,
+            .timeout_ns = timeout_ms *| ns_per_ms,
+            .out_level = out_level,
+            .err_level = err_level,
+            .interactive = interactive,
+            .json = json,
+            .target_text = target_text,
+            .iface = ifname,
+        });
+        return;
+    }
+
+    const cidr = try targets.parseCidr(target_text);
+    var eng = try targets.Engine.init(allocator, &.{cidr}, ports, seed);
+    defer eng.deinit();
+    const count = if (netutil.getFlag(args, "--count")) |c| try std.fmt.parseInt(u64, c, 10) else eng.total;
+
+    try connect.run(allocator, .{
+        .source = .{ .v4 = &eng },
+        .count = count,
+        .total = @min(count, eng.total),
+        .rate = rate,
+        .concurrency = concurrency,
+        .timeout_ns = timeout_ms *| ns_per_ms,
+        .out_level = out_level,
+        .err_level = err_level,
+        .interactive = interactive,
+        .json = json,
+        .target_text = target_text,
+        .iface = ifname,
+    });
+}
+
 pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, env: *std.process.Environ.Map) !void {
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
@@ -237,11 +563,33 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, e
     const json = netutil.hasFlag(args, "--json");
     const is_udp = netutil.hasFlag(args, "--udp");
     const banners_flag = netutil.hasFlag(args, "--banners");
-    const backend_choice = packet_io.parseChoice(netutil.getFlag(args, "--backend")) orelse {
-        try derr.writeAll("scan: --backend must be one of auto, xdp, afpacket\n");
+
+    const backend_arg = netutil.getFlag(args, "--backend");
+    const connect_mode = netutil.hasFlag(args, "--connect") or
+        (backend_arg != null and std.mem.eql(u8, backend_arg.?, "connect"));
+    if (connect_mode) {
+        return runConnect(io, allocator, args, env, target_text, ifname, rate, is_udp, json, derr);
+    }
+
+    const backend_choice = packet_io.parseChoice(backend_arg) orelse {
+        try derr.writeAll("scan: --backend must be one of auto, xdp, afpacket, connect\n");
         try derr.flush();
         return;
     };
+
+    if (backend_choice == .auto) {
+        const raw_status = rawprobe.probe(ifname);
+        if (raw_status != .ok) {
+            try derr.print("  raw sends unavailable on '{s}' ({s}); falling back to unprivileged connect scan\n", .{ ifname, raw_status.reason() });
+            try derr.writeAll("  (force the raw engine with --backend afpacket, or select it directly with --connect)\n");
+            try derr.flush();
+            return runConnect(io, allocator, args, env, target_text, ifname, rate, is_udp, json, derr);
+        }
+    }
+
+    if (std.mem.indexOfScalar(u8, target_text, ':') != null) {
+        return runV6Scan(io, allocator, args, env, target_text, ifname, rate, backend_choice, derr);
+    }
 
     var scfg = stealth.parse(allocator, io, args) catch |e| switch (e) {
         error.AuthorizationRequired => {
@@ -441,7 +789,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, e
     var fdedup = try dedup.Dedup.init(allocator, dedup_capacity);
     defer fdedup.deinit();
 
-    var receiver = rx.Receiver.open(ifname, &tx_done, drain_window_ns, hard_cap_ns) catch |err| switch (err) {
+    var receiver = rx.Receiver.open(ifname, rx.ETH_P_IP, &tx_done, drain_window_ns, hard_cap_ns) catch |err| switch (err) {
         error.NeedCapNetRaw => {
             try derr.writeAll(need_cap_hint);
             try derr.flush();
@@ -566,6 +914,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, e
             try out.flush();
         } else {
             try derr.writeAll("  no open, closed, or filtered responses observed\n");
+            if (sent > 0) try derr.writeAll("  (if a cloud/VM hypervisor is filtering raw sends upstream, retry with --connect)\n");
         }
         if (findings.items.len > 0) {
             std.mem.sort(service.Finding, findings.items, {}, findingLess);

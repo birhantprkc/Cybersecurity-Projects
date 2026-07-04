@@ -38,6 +38,23 @@ pub const Cookie = struct {
         const off: u32 = @intCast(self.generate(ip_them, port_them, ip_me, 0) % s);
         return @intCast((@as(u32, base) + off) & 0xffff);
     }
+
+    pub fn generate6(self: Cookie, ip_them: [16]u8, port_them: u16, ip_me: [16]u8, port_me: u16) u64 {
+        var data: [36]u8 = undefined;
+        @memcpy(data[0..16], &ip_them);
+        std.mem.writeInt(u16, data[16..18], port_them, .big);
+        @memcpy(data[18..34], &ip_me);
+        std.mem.writeInt(u16, data[34..36], port_me, .big);
+        return std.hash.SipHash64(2, 4).toInt(&data, &self.key);
+    }
+
+    pub fn seq6(self: Cookie, ip_them: [16]u8, port_them: u16, ip_me: [16]u8, port_me: u16) u32 {
+        return @truncate(self.generate6(ip_them, port_them, ip_me, port_me));
+    }
+
+    pub fn validateSynAck6(self: Cookie, ack: u32, ip_them: [16]u8, port_them: u16, ip_me: [16]u8, port_me: u16) bool {
+        return ack == self.seq6(ip_them, port_them, ip_me, port_me) +% 1;
+    }
 };
 
 const test_key = [16]u8{
@@ -101,4 +118,39 @@ test "udpSrcPort separates distinct targets" {
     const p53 = c.udpSrcPort(0x08080808, 53, 0x0a000001, 40000, 8192);
     const p123 = c.udpSrcPort(0x08080808, 123, 0x0a000001, 40000, 8192);
     try std.testing.expect(p53 != p123);
+}
+
+const v6_them = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11 };
+const v6_me = [16]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x22 };
+
+test "generate6 is deterministic for a fixed key + IPv6 4-tuple" {
+    const c = Cookie.init(test_key);
+    const a = c.generate6(v6_them, 443, v6_me, 51000);
+    const b = c.generate6(v6_them, 443, v6_me, 51000);
+    try std.testing.expectEqual(a, b);
+}
+
+test "seq6 is the low 32 bits and validateSynAck6 accepts seq+1 with u32 wrap" {
+    const c = Cookie.init(test_key);
+    const full = c.generate6(v6_them, 443, v6_me, 51000);
+    const s = c.seq6(v6_them, 443, v6_me, 51000);
+    try std.testing.expectEqual(@as(u32, @truncate(full)), s);
+    try std.testing.expect(c.validateSynAck6(s +% 1, v6_them, 443, v6_me, 51000));
+    try std.testing.expect(!c.validateSynAck6(s, v6_them, 443, v6_me, 51000));
+    try std.testing.expect(!c.validateSynAck6(s +% 2, v6_them, 443, v6_me, 51000));
+}
+
+test "generate6 separates distinct addresses and ports" {
+    const c = Cookie.init(test_key);
+    var other = v6_them;
+    other[15] = 0x12;
+    try std.testing.expect(c.generate6(v6_them, 443, v6_me, 51000) != c.generate6(other, 443, v6_me, 51000));
+    try std.testing.expect(c.generate6(v6_them, 443, v6_me, 51000) != c.generate6(v6_them, 80, v6_me, 51000));
+}
+
+test "v4 and v6 cookies over analogous tuples do not collide" {
+    const c = Cookie.init(test_key);
+    const v4 = c.generate(0x0a000001, 443, 0xc0a80002, 51000);
+    const v6 = c.generate6(v6_them, 443, v6_me, 51000);
+    try std.testing.expect(v4 != v6);
 }

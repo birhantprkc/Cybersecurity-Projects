@@ -3,14 +3,94 @@
 
 const std = @import("std");
 
+const zingela_version = "0.0.0-m11";
+
+const ReleaseTarget = struct {
+    query: std.Target.Query,
+    asset: []const u8,
+};
+
+const release_targets = [_]ReleaseTarget{
+    .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }, .asset = "zingela-x86_64-linux-musl" },
+    .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl }, .asset = "zingela-aarch64-linux-musl" },
+};
+
+const Built = struct {
+    exe: *std.Build.Step.Compile,
+    test_mods: []const *std.Build.Module,
+    packet: *std.Build.Module,
+    cookie: *std.Build.Module,
+    targets: *std.Build.Module,
+    template: *std.Build.Module,
+    dedup: *std.Build.Module,
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const xdp_enabled = b.option(bool, "xdp", "Enable the AF_XDP TX backend (pure-syscall, no libxdp; needs CAP_NET_ADMIN at runtime)") orelse false;
 
+    const host = buildZingela(b, target, optimize, xdp_enabled);
+    b.installArtifact(host.exe);
+
+    const run_cmd = b.addRunArtifact(host.exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
+    const run_step = b.step("run", "Run zingela");
+    run_step.dependOn(&run_cmd.step);
+
+    const smoke_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, "zingela")});
+    smoke_cmd.addArg("smoke");
+    if (b.args) |args| smoke_cmd.addArgs(args);
+    smoke_cmd.step.dependOn(b.getInstallStep());
+    const smoke_step = b.step("smoke", "AF_PACKET ground-truth smoke on the installed binary (setcap it first)");
+    smoke_step.dependOn(&smoke_cmd.step);
+
+    const test_step = b.step("test", "Run unit tests");
+    for (host.test_mods) |mod| {
+        const t = b.addTest(.{ .root_module = mod });
+        const rt = b.addRunArtifact(t);
+        test_step.dependOn(&rt.step);
+    }
+
+    const bench_src = buildZingela(b, target, .ReleaseFast, xdp_enabled);
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("packet", bench_src.packet);
+    bench_mod.addImport("cookie", bench_src.cookie);
+    bench_mod.addImport("targets", bench_src.targets);
+    bench_mod.addImport("template", bench_src.template);
+    bench_mod.addImport("dedup", bench_src.dedup);
+    const bench_exe = b.addExecutable(.{ .name = "zingela-bench", .root_module = bench_mod });
+    const bench_run = b.addRunArtifact(bench_exe);
+    if (b.args) |args| bench_run.addArgs(args);
+    const bench_step = b.step("bench", "Run the hot-path microbenchmarks (ReleaseFast, measured on this host)");
+    bench_step.dependOn(&bench_run.step);
+
+    const release_step = b.step("release", "Build static musl release binaries for every distribution target");
+    for (release_targets) |rt| {
+        const resolved = b.resolveTargetQuery(rt.query);
+        const built = buildZingela(b, resolved, .ReleaseSafe, xdp_enabled);
+        const inst = b.addInstallArtifact(built.exe, .{
+            .dest_dir = .{ .override = .{ .custom = "release" } },
+            .dest_sub_path = rt.asset,
+        });
+        release_step.dependOn(&inst.step);
+    }
+}
+
+fn buildZingela(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    xdp_enabled: bool,
+) Built {
     const opts = b.addOptions();
-    opts.addOption([]const u8, "version", "0.0.0-m10");
+    opts.addOption([]const u8, "version", zingela_version);
     opts.addOption(bool, "xdp", xdp_enabled);
     const build_config_mod = opts.createModule();
 
@@ -274,26 +354,23 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("smoke", smoke_mod);
     exe.root_module.addImport("txcmd", txcmd_mod);
     exe.root_module.addImport("scancmd", scancmd_mod);
-    b.installArtifact(exe);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run zingela");
-    run_step.dependOn(&run_cmd.step);
+    const test_mods = b.allocator.dupe(*std.Build.Module, &.{
+        packet_mod,   cli_mod,       smoke_mod,     cookie_mod,  numtheory_mod,
+        targets_mod,  ratelimit_mod, template_mod,  segment_mod, regex_mod,
+        probe_mod,    service_mod,   payloads_mod,  udp_mod,     afpacket_mod,
+        xdp_mod,      afxdp_mod,     packet_io_mod, tx_mod,      txcmd_mod,
+        classify_mod, dedup_mod,     rx_mod,        netutil_mod, rawprobe_mod,
+        ndp_mod,      stealth_mod,   output_mod,    connect_mod, scancmd_mod,
+    }) catch @panic("OOM");
 
-    const smoke_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, "zingela")});
-    smoke_cmd.addArg("smoke");
-    if (b.args) |args| smoke_cmd.addArgs(args);
-    smoke_cmd.step.dependOn(b.getInstallStep());
-    const smoke_step = b.step("smoke", "AF_PACKET ground-truth smoke on the installed binary (setcap it first)");
-    smoke_step.dependOn(&smoke_cmd.step);
-
-    const test_step = b.step("test", "Run unit tests");
-    const test_mods = [_]*std.Build.Module{ packet_mod, cli_mod, smoke_mod, cookie_mod, numtheory_mod, targets_mod, ratelimit_mod, template_mod, segment_mod, regex_mod, probe_mod, service_mod, payloads_mod, udp_mod, afpacket_mod, xdp_mod, afxdp_mod, packet_io_mod, tx_mod, txcmd_mod, classify_mod, dedup_mod, rx_mod, netutil_mod, rawprobe_mod, ndp_mod, stealth_mod, output_mod, connect_mod, scancmd_mod };
-    for (test_mods) |mod| {
-        const t = b.addTest(.{ .root_module = mod });
-        const rt = b.addRunArtifact(t);
-        test_step.dependOn(&rt.step);
-    }
+    return .{
+        .exe = exe,
+        .test_mods = test_mods,
+        .packet = packet_mod,
+        .cookie = cookie_mod,
+        .targets = targets_mod,
+        .template = template_mod,
+        .dedup = dedup_mod,
+    };
 }

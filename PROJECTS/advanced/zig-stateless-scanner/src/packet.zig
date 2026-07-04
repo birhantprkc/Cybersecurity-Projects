@@ -293,27 +293,26 @@ const window_macos: u16 = 65535;
 const syn_opts_masscan = [_]u8{ opt_mss, opt_mss_len, mss_ethernet_hi, mss_ethernet_lo };
 
 const syn_opts_linux = [_]u8{
-    opt_mss,       opt_mss_len, mss_ethernet_hi, mss_ethernet_lo,
-    opt_sack_perm, opt_sack_perm_len,
-    opt_ts,        opt_ts_len,  0,               0,
-    0,             0,           0,               0,
-    0,             0,           opt_nop,         opt_wscale,
-    opt_wscale_len, wscale_linux,
+    opt_mss,       opt_mss_len,       mss_ethernet_hi, mss_ethernet_lo,
+    opt_sack_perm, opt_sack_perm_len, opt_ts,          opt_ts_len,
+    0,             0,                 0,               0,
+    0,             0,                 0,               0,
+    opt_nop,       opt_wscale,        opt_wscale_len,  wscale_linux,
 };
 
 const syn_opts_windows = [_]u8{
-    opt_mss,     opt_mss_len,   mss_ethernet_hi, mss_ethernet_lo,
-    opt_nop,     opt_wscale,    opt_wscale_len,  wscale_windows,
-    opt_nop,     opt_nop,       opt_sack_perm,   opt_sack_perm_len,
+    opt_mss, opt_mss_len, mss_ethernet_hi, mss_ethernet_lo,
+    opt_nop, opt_wscale,  opt_wscale_len,  wscale_windows,
+    opt_nop, opt_nop,     opt_sack_perm,   opt_sack_perm_len,
 };
 
 const syn_opts_macos = [_]u8{
-    opt_mss,     opt_mss_len,   mss_ethernet_hi, mss_ethernet_lo,
-    opt_nop,     opt_wscale,    opt_wscale_len,  wscale_macos,
-    opt_nop,     opt_nop,       opt_ts,          opt_ts_len,
-    0,           0,             0,               0,
-    0,           0,             0,               0,
-    opt_sack_perm, opt_sack_perm_len, opt_eol,   opt_eol,
+    opt_mss,       opt_mss_len,       mss_ethernet_hi, mss_ethernet_lo,
+    opt_nop,       opt_wscale,        opt_wscale_len,  wscale_macos,
+    opt_nop,       opt_nop,           opt_ts,          opt_ts_len,
+    0,             0,                 0,               0,
+    0,             0,                 0,               0,
+    opt_sack_perm, opt_sack_perm_len, opt_eol,         opt_eol,
 };
 
 pub const max_syn_options_len: usize = syn_opts_macos.len;

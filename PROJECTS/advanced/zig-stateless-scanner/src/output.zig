@@ -546,13 +546,13 @@ pub fn renderServices(out: *std.Io.Writer, level: ColorLevel, rows: []const Serv
 
     try out.writeAll("  ");
     try span(out, level, chrome_gray, "\u{2502} ");
-    try renderCell(out, level,"HOST", w_host, bright_white);
+    try renderCell(out, level, "HOST", w_host, bright_white);
     try span(out, level, chrome_gray, " \u{2502} ");
-    try renderCell(out, level,"PORT", w_port, bright_white);
+    try renderCell(out, level, "PORT", w_port, bright_white);
     try span(out, level, chrome_gray, " \u{2502} ");
-    try renderCell(out, level,"SERVICE", w_service, bright_white);
+    try renderCell(out, level, "SERVICE", w_service, bright_white);
     try span(out, level, chrome_gray, " \u{2502} ");
-    try renderCell(out, level,"VERSION / INFO", w_info, bright_white);
+    try renderCell(out, level, "VERSION / INFO", w_info, bright_white);
     try span(out, level, chrome_gray, " \u{2502}");
     try out.writeByte('\n');
 
@@ -571,16 +571,16 @@ pub fn renderServices(out: *std.Io.Writer, level: ColorLevel, rows: []const Serv
 
         try out.writeAll("  ");
         try span(out, level, chrome_gray, "\u{2502} ");
-        try renderCell(out, level,ipbuf[0..ipw.end], w_host, bright_white);
+        try renderCell(out, level, ipbuf[0..ipw.end], w_host, bright_white);
         try span(out, level, chrome_gray, " \u{2502} ");
         try pad(out, w_port - port_str.len);
         try setFg(out, level, bright_white);
         try out.writeAll(port_str);
         try resetFg(out, level);
         try span(out, level, chrome_gray, " \u{2502} ");
-        try renderCell(out, level,r.service, w_service, neon_green);
+        try renderCell(out, level, r.service, w_service, neon_green);
         try span(out, level, chrome_gray, " \u{2502} ");
-        try renderCell(out, level,info_disp, w_info, bright_white);
+        try renderCell(out, level, info_disp, w_info, bright_white);
         try span(out, level, chrome_gray, " \u{2502}");
         try out.writeByte('\n');
     }

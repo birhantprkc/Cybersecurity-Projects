@@ -295,6 +295,122 @@ func (s *Store) ArticlesForCVE(id string) ([]ArticleSummary, error) {
 	return scanArticleSummaries(rows)
 }
 
+type DigestArticle struct {
+	ID           int64
+	SourceName   string
+	SourceWeight float64
+	Title        string
+	CanonicalURL string
+	PublishedAt  int64
+}
+
+type DigestCVE struct {
+	ID        string
+	CVSSScore *float64
+	EPSS      *float64
+	IsKEV     bool
+}
+
+type DigestCluster struct {
+	ClusterID int64
+	Key       string
+	Size      int
+	FirstSeen int64
+	LastSeen  int64
+	Articles  []DigestArticle
+	CVEs      []DigestCVE
+}
+
+func (s *Store) DigestClusters(since int64) ([]DigestCluster, error) {
+	byID, order, err := s.digestClusterRows(since)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.digestAttachArticles(byID); err != nil {
+		return nil, err
+	}
+	if err := s.digestAttachCVEs(byID); err != nil {
+		return nil, err
+	}
+	out := make([]DigestCluster, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out, nil
+}
+
+func (s *Store) digestClusterRows(since int64) (map[int64]*DigestCluster, []int64, error) {
+	rows, err := s.db.Query(`
+		SELECT id, cluster_key, size, first_seen, last_seen
+		FROM clusters WHERE last_seen >= ? ORDER BY id`, since)
+	if err != nil {
+		return nil, nil, fmt.Errorf("digest clusters: %w", err)
+	}
+	defer rows.Close()
+	byID := make(map[int64]*DigestCluster)
+	var order []int64
+	for rows.Next() {
+		var dc DigestCluster
+		if err := rows.Scan(&dc.ClusterID, &dc.Key, &dc.Size, &dc.FirstSeen, &dc.LastSeen); err != nil {
+			return nil, nil, fmt.Errorf("digest clusters: scan: %w", err)
+		}
+		clone := dc
+		byID[dc.ClusterID] = &clone
+		order = append(order, dc.ClusterID)
+	}
+	return byID, order, rows.Err()
+}
+
+func (s *Store) digestAttachArticles(byID map[int64]*DigestCluster) error {
+	rows, err := s.db.Query(`
+		SELECT cm.cluster_id, a.id, s.name, s.weight, a.title, a.canonical_url, a.published_at
+		FROM cluster_members cm
+		JOIN articles a ON a.id = cm.article_id
+		JOIN sources s ON s.id = a.source_id
+		ORDER BY cm.cluster_id, a.id`)
+	if err != nil {
+		return fmt.Errorf("digest articles: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var clusterID int64
+		var a DigestArticle
+		if err := rows.Scan(&clusterID, &a.ID, &a.SourceName, &a.SourceWeight, &a.Title, &a.CanonicalURL, &a.PublishedAt); err != nil {
+			return fmt.Errorf("digest articles: scan: %w", err)
+		}
+		if dc, ok := byID[clusterID]; ok {
+			dc.Articles = append(dc.Articles, a)
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) digestAttachCVEs(byID map[int64]*DigestCluster) error {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT cm.cluster_id, c.id, c.cvss_score, c.epss, c.is_kev
+		FROM cluster_members cm
+		JOIN article_cves ac ON ac.article_id = cm.article_id
+		JOIN cves c ON c.id = ac.cve_id
+		ORDER BY cm.cluster_id, c.id`)
+	if err != nil {
+		return fmt.Errorf("digest cves: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var clusterID int64
+		var v DigestCVE
+		var isKEV int
+		if err := rows.Scan(&clusterID, &v.ID, &v.CVSSScore, &v.EPSS, &isKEV); err != nil {
+			return fmt.Errorf("digest cves: scan: %w", err)
+		}
+		v.IsKEV = isKEV != 0
+		if dc, ok := byID[clusterID]; ok {
+			dc.CVEs = append(dc.CVEs, v)
+		}
+	}
+	return rows.Err()
+}
+
 func (s *Store) UpsertCVEStub(id string) error {
 	_, err := s.db.Exec(`INSERT INTO cves (id) VALUES (?) ON CONFLICT(id) DO NOTHING`, id)
 	if err != nil {

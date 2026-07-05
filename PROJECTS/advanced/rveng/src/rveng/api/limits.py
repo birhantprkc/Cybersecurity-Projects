@@ -1,0 +1,9 @@
+"""
+©AngelaMos | 2026
+limits.py
+"""
+
+MAX_HEX_BYTES = 4096
+MAX_DISASM_BYTES = 65536
+MAX_ANSWER_LEN = 8192
+DEFAULT_SESSION = "local"

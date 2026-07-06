@@ -1,12 +1,23 @@
 <!-- ©AngelaMos | 2026 -->
 <!-- README.md -->
 
-```
-   ______   _____  ____  ____ _
-  / ___/ | / / _ \/ __ \/ __ `/
- / /   | |/ /  __/ / / / /_/ /
-/_/    |___/\___/_/ /_/\__, /
-                      /____/
+```json                                                                                                         
+RRRRRRRRRRRRRRRRR   VVVVVVVV           VVVVVVVVEEEEEEEEEEEEEEEEEEEEEENNNNNNNN        NNNNNNNN        GGGGGGGGGGGGG
+R::::::::::::::::R  V::::::V           V::::::VE::::::::::::::::::::EN:::::::N       N::::::N     GGG::::::::::::G
+R::::::RRRRRR:::::R V::::::V           V::::::VE::::::::::::::::::::EN::::::::N      N::::::N   GG:::::::::::::::G
+RR:::::R     R:::::RV::::::V           V::::::VEE::::::EEEEEEEEE::::EN:::::::::N     N::::::N  G:::::GGGGGGGG::::G
+  R::::R     R:::::R V:::::V           V:::::V   E:::::E       EEEEEEN::::::::::N    N::::::N G:::::G       GGGGGG
+  R::::R     R:::::R  V:::::V         V:::::V    E:::::E             N:::::::::::N   N::::::NG:::::G              
+  R::::RRRRRR:::::R    V:::::V       V:::::V     E::::::EEEEEEEEEE   N:::::::N::::N  N::::::NG:::::G              
+  R:::::::::::::RR      V:::::V     V:::::V      E:::::::::::::::E   N::::::N N::::N N::::::NG:::::G    GGGGGGGGGG
+  R::::RRRRRR:::::R      V:::::V   V:::::V       E:::::::::::::::E   N::::::N  N::::N:::::::NG:::::G    G::::::::G
+  R::::R     R:::::R      V:::::V V:::::V        E::::::EEEEEEEEEE   N::::::N   N:::::::::::NG:::::G    GGGGG::::G
+  R::::R     R:::::R       V:::::V:::::V         E:::::E             N::::::N    N::::::::::NG:::::G        G::::G
+  R::::R     R:::::R        V:::::::::V          E:::::E       EEEEEEN::::::N     N:::::::::N G:::::G       G::::G
+RR:::::R     R:::::R         V:::::::V         EE::::::EEEEEEEE:::::EN::::::N      N::::::::N  G:::::GGGGGGGG::::G
+R::::::R     R:::::R          V:::::V          E::::::::::::::::::::EN::::::N       N:::::::N   GG:::::::::::::::G
+R::::::R     R:::::R           V:::V           E::::::::::::::::::::EN::::::N        N::::::N     GGG::::::GGG:::G
+RRRRRRRR     RRRRRRR            VVV            EEEEEEEEEEEEEEEEEEEEEENNNNNNNN         NNNNNNN        GGGGGG   GGGG
 ```
 
 [![Cybersecurity Projects](https://img.shields.io/badge/Cybersecurity--Projects-Project%20%2337-red?style=flat&logo=github)](https://github.com/CarterPerez-dev/Cybersecurity-Projects/tree/main/PROJECTS/advanced/rveng)

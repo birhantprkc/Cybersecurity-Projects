@@ -20,8 +20,8 @@ from rveng.api.limits import (
 from rveng.api.middleware import BodySizeLimitMiddleware
 from rveng.api.store import (
     ChallengeStore,
-    InMemoryProgress,
     ProgressStore,
+    SqliteProgress,
     load_store,
 )
 from rveng.engine import cfg as cfgmod
@@ -41,7 +41,7 @@ def create_app(
     Build the rveng API over a challenge store and progress store
     """
     store = store or load_store(CHALLENGES_ROOT)
-    progress = progress or InMemoryProgress()
+    progress = progress or SqliteProgress()
     app = FastAPI(title="rveng")
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
     app.add_middleware(

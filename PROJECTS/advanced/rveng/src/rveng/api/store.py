@@ -5,6 +5,8 @@ store.py
 
 import json
 import logging
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -21,6 +23,12 @@ log = logging.getLogger(__name__)
 MANIFEST = "challenge.json"
 TARGET = "target"
 SOURCE = "source.c"
+
+DATA_DIR = "data"
+DB_FILENAME = "progress.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / DATA_DIR / DB_FILENAME
+IN_MEMORY_DB = ":memory:"
+SOLVED_TABLE = "solved"
 
 CAT_FOUND_VALUE = "found_value"
 CAT_IDENTIFIED_SYMBOL = "identified_symbol"
@@ -118,7 +126,7 @@ class ProgressStore(Protocol):
 
 class InMemoryProgress:
     """
-    A process-local progress store, swapped for SQLite in M4
+    A process-local progress store used for tests and ephemeral runs
     """
 
     def __init__(self):
@@ -129,3 +137,38 @@ class InMemoryProgress:
 
     def solved(self, session: str) -> set[str]:
         return set(self._solved.get(session, set()))
+
+
+class SqliteProgress:
+    """
+    A SQLite-backed progress store durable across restarts
+    """
+
+    def __init__(self, path: Path | str = DEFAULT_DB_PATH):
+        self._path = str(path)
+        if self._path != IN_MEMORY_DB:
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        self._conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {SOLVED_TABLE} ("
+            "session TEXT NOT NULL, "
+            "challenge_id TEXT NOT NULL, "
+            "PRIMARY KEY (session, challenge_id))")
+        self._conn.commit()
+
+    def mark_solved(self, session: str, challenge_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO {SOLVED_TABLE} "
+                "(session, challenge_id) VALUES (?, ?)",
+                (session, challenge_id))
+            self._conn.commit()
+
+    def solved(self, session: str) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT challenge_id FROM {SOLVED_TABLE} "
+                "WHERE session = ?",
+                (session,)).fetchall()
+        return {row[0] for row in rows}

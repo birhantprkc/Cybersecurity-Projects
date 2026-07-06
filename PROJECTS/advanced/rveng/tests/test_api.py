@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from rveng.api.app import create_app
 from rveng.api.limits import MAX_HEX_BYTES, MAX_SESSION_LEN
-from rveng.api.store import load_store
+from rveng.api.store import InMemoryProgress, SqliteProgress, load_store
 
 CHALLENGES = Path(__file__).resolve().parents[1] / "challenges"
 
@@ -23,15 +23,15 @@ ELF_MAGIC_LINE = (
 
 @pytest.fixture()
 def client() -> TestClient:
-    return TestClient(create_app())
+    return TestClient(create_app(progress=InMemoryProgress()))
 
 
 def test_list_has_the_seed_challenges(client: TestClient):
     body = client.get("/api/challenges").json()
     ids = {c["id"] for c in body}
     assert ids == {
-        "03-flip-the-gate", "04-name-the-function", "05-find-the-gate",
-        "06-stripped-gate"}
+        "01-read-the-hex", "02-find-the-entry", "03-flip-the-gate",
+        "04-name-the-function", "05-find-the-gate", "06-stripped-gate"}
 
 
 def test_detail_does_not_leak_source_or_answer(client: TestClient):
@@ -152,7 +152,7 @@ def test_progress_tracks_solves(client: TestClient):
         json={"answer": "1337", "session": "s1"})
     body = client.get("/api/progress?session=s1").json()
     assert body["solved"] == ["05-find-the-gate"]
-    assert body["total"] == 4
+    assert body["total"] == 6
 
 
 def test_disasm_resolves_import_call_names(client: TestClient):
@@ -203,6 +203,49 @@ def test_stripped_challenge_grades_found_value(client: TestClient):
     r = client.post(
         "/api/challenges/06-stripped-gate/submit",
         json={"answer": "0x539"}).json()
+    assert r["correct"] is True
+
+
+def test_sqlite_backed_progress_survives_a_fresh_app(tmp_path: Path):
+    db = tmp_path / "progress.db"
+    first = TestClient(create_app(progress=SqliteProgress(db)))
+    first.post(
+        "/api/challenges/05-find-the-gate/submit",
+        json={"answer": "1337", "session": "s1"})
+    reopened = TestClient(create_app(progress=SqliteProgress(db)))
+    body = reopened.get("/api/progress?session=s1").json()
+    assert body["solved"] == ["05-find-the-gate"]
+
+
+def test_hex_challenge_reveals_secret_string(client: TestClient):
+    r = client.post(
+        "/api/challenges/01-read-the-hex/submit",
+        json={"answer": "the_flag_is_here"}).json()
+    assert r["correct"] is True
+    assert "the_flag_is_here" in r["revealed_source"]
+
+
+def test_hex_challenge_wrong_string_hides_source(client: TestClient):
+    r = client.post(
+        "/api/challenges/01-read-the-hex/submit",
+        json={"answer": "wrong_string"}).json()
+    assert r["correct"] is False
+    assert r["revealed_source"] is None
+
+
+def test_entry_challenge_grades_hex_and_decimal(client: TestClient):
+    for answer in ("0x401060", "4198496", "401060h"):
+        r = client.post(
+            "/api/challenges/02-find-the-entry/submit",
+            json={"answer": answer}).json()
+        assert r["correct"] is True, answer
+
+
+def test_entry_challenge_matches_engine_header(client: TestClient):
+    body = client.get("/api/challenges/02-find-the-entry/elf").json()
+    r = client.post(
+        "/api/challenges/02-find-the-entry/submit",
+        json={"answer": hex(body["entry"])}).json()
     assert r["correct"] is True
 
 

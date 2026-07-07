@@ -18,6 +18,9 @@ docs/
 *.sqlite
 /data/
 
+# large local KEV catalog snapshot (manual download; tests use kev-sample.json)
+/testdata/kev/kev-full.json
+
 # env / secrets / local overrides
 .env
 *.local.yaml

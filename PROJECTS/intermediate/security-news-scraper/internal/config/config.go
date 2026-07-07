@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,6 +51,12 @@ const (
 	defaultGeminiModel  = "gemini-2.5-flash"
 	defaultAnthropicURL = "https://api.anthropic.com/v1"
 	defaultClaudeModel  = "claude-sonnet-4-6"
+
+	defaultWatchInterval       = "1h"
+	defaultWatchNotifyMinScore = 0.5
+	defaultWatchNotifyMax      = 10
+
+	MinWatchInterval = time.Minute
 )
 
 var defaultTrackingParams = []string{
@@ -109,6 +116,14 @@ type AI struct {
 	Anthropic Provider `yaml:"anthropic"`
 }
 
+type Watch struct {
+	Interval       string  `yaml:"interval"`
+	WebhookURL     string  `yaml:"webhook_url"`
+	NotifyMinScore float64 `yaml:"notify_min_score"`
+	NotifyMaxItems int     `yaml:"notify_max_items"`
+	NotifyOnKEV    bool    `yaml:"notify_on_kev"`
+}
+
 type Config struct {
 	DBPath      string   `yaml:"db_path"`
 	SourcesPath string   `yaml:"sources_path"`
@@ -118,6 +133,7 @@ type Config struct {
 	Cluster     Cluster  `yaml:"cluster"`
 	Rank        Rank     `yaml:"rank"`
 	AI          AI       `yaml:"ai"`
+	Watch       Watch    `yaml:"watch"`
 }
 
 func Default() Config {
@@ -162,6 +178,12 @@ func Default() Config {
 			OpenAI:    Provider{BaseURL: defaultOpenAIURL, Model: defaultOpenAIModel},
 			Gemini:    Provider{BaseURL: defaultGeminiURL, Model: defaultGeminiModel},
 			Anthropic: Provider{BaseURL: defaultAnthropicURL, Model: defaultClaudeModel},
+		},
+		Watch: Watch{
+			Interval:       defaultWatchInterval,
+			NotifyMinScore: defaultWatchNotifyMinScore,
+			NotifyMaxItems: defaultWatchNotifyMax,
+			NotifyOnKEV:    true,
 		},
 	}
 }
@@ -231,6 +253,19 @@ func (c Config) validate() error {
 	case "qwen", "openai", "gemini", "anthropic":
 	default:
 		return fmt.Errorf("config: ai.provider must be one of qwen|openai|gemini|anthropic, got %q", c.AI.Provider)
+	}
+	d, err := time.ParseDuration(c.Watch.Interval)
+	if err != nil {
+		return fmt.Errorf("config: watch.interval %q is not a valid duration: %w", c.Watch.Interval, err)
+	}
+	if d < MinWatchInterval {
+		return fmt.Errorf("config: watch.interval must be >= %s, got %s", MinWatchInterval, c.Watch.Interval)
+	}
+	if c.Watch.NotifyMinScore < 0 || c.Watch.NotifyMinScore > 1 {
+		return fmt.Errorf("config: watch.notify_min_score must be in [0,1], got %v", c.Watch.NotifyMinScore)
+	}
+	if c.Watch.NotifyMaxItems < 1 {
+		return fmt.Errorf("config: watch.notify_max_items must be >= 1, got %d", c.Watch.NotifyMaxItems)
 	}
 	return nil
 }

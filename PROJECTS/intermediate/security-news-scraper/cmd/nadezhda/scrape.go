@@ -6,13 +6,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/CarterPerez-dev/nadezhda/internal/cluster"
 	"github.com/CarterPerez-dev/nadezhda/internal/config"
 	"github.com/CarterPerez-dev/nadezhda/internal/enrich"
 	"github.com/CarterPerez-dev/nadezhda/internal/fetch"
@@ -78,24 +75,15 @@ func runScrape(cmd *cobra.Command, args []string) error {
 		MaxRetries:   cfg.Fetch.MaxRetries,
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
+	ctx := cmd.Context()
 	now := time.Now()
-	summary, err := ingest.Run(ctx, fc, st, cfg, targets, now)
+	summary, cstats, err := ingestAndCluster(ctx, fc, st, cfg, targets, now)
 	if err != nil {
 		return err
 	}
 	printSummary(cmd, summary)
-
-	sinceUnix := now.Unix() - int64(cfg.Cluster.LookbackHours)*secondsPerHour
-	windowSeconds := int64(cfg.Cluster.WindowHours) * secondsPerHour
-	stats, err := cluster.Rebuild(st, cfg.Cluster.TitleJaccard, windowSeconds, sinceUnix)
-	if err != nil {
-		return err
-	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%d clusters (%d multi-source, largest %d)\n",
-		stats.Total, stats.MultiSource, stats.LargestSize)
+		cstats.Total, cstats.MultiSource, cstats.LargestSize)
 
 	if !scrapeNoEnrich {
 		enrichAfterScrape(ctx, cmd, cfg, st)

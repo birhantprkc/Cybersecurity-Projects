@@ -4,11 +4,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -43,10 +41,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	}
 	defer st.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
-	stats, err := enrich.Run(ctx, st, buildEnrichClients(cfg), time.Now(), cfg.Enrich.CacheTTLHours, cfg.Enrich.NegativeTTLHours)
+	stats, err := enrich.Run(cmd.Context(), st, buildEnrichClients(cfg), time.Now(), cfg.Enrich.CacheTTLHours, cfg.Enrich.NegativeTTLHours)
 	if err != nil {
 		return err
 	}

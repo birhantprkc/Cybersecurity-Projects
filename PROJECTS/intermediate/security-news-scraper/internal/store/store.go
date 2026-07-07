@@ -347,12 +347,16 @@ func (s *Store) digestClusterRows(since int64) (map[int64]*DigestCluster, []int6
 		return nil, nil, fmt.Errorf("digest clusters: %w", err)
 	}
 	defer rows.Close()
+	return scanClusterRows(rows)
+}
+
+func scanClusterRows(rows *sql.Rows) (map[int64]*DigestCluster, []int64, error) {
 	byID := make(map[int64]*DigestCluster)
 	var order []int64
 	for rows.Next() {
 		var dc DigestCluster
 		if err := rows.Scan(&dc.ClusterID, &dc.Key, &dc.Size, &dc.FirstSeen, &dc.LastSeen); err != nil {
-			return nil, nil, fmt.Errorf("digest clusters: scan: %w", err)
+			return nil, nil, fmt.Errorf("scan cluster rows: %w", err)
 		}
 		clone := dc
 		byID[dc.ClusterID] = &clone
